@@ -35,7 +35,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
   id: "netease-yunxin",
   meta: { ...meta, aliases: [...meta.aliases] },
   capabilities: {
-    chatTypes: ["direct"],
+    chatTypes: ["direct", "channel"],
     reactions: false,
     threads: false,
     media: true,
@@ -147,11 +147,12 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
       const lower = t.toLowerCase();
       if (lower.startsWith("netease-yunxin:")) return t;
       if (lower.startsWith("nim:") || lower.startsWith("yunxin:")) return t;
+      if (lower.startsWith("channel:") || lower.startsWith("team:")) return `netease-yunxin:${t}`;
       return `netease-yunxin:${t}`;
     },
     targetResolver: {
       looksLikeId: (raw) => raw.trim().length > 0,
-      hint: "<accid>",
+      hint: "<accid> or channel:<teamId>",
     },
   },
   outbound: neteaseYunxinOutbound,
@@ -203,6 +204,8 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
                 text: msg.text,
                 messageId: msg.messageId,
                 timestamp: msg.timestamp,
+                conversationType: msg.conversationType,
+                teamId: msg.teamId,
               },
               account,
               config: ctx.cfg,

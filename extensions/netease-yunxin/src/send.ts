@@ -9,14 +9,28 @@ function resolveAccountIdForSend(
   return accountId?.trim() || resolveDefaultNeteaseYunxinAccountId(cfg);
 }
 
-/** Strip channel prefix so SDK receives bare accid (e.g. 453355). */
-function toAccid(target: string): string {
+/** Strip channel prefix so SDK receives bare accid (e.g. 453355) or "channel:teamId". */
+function parseTarget(target: string): { accid?: string; teamId?: string } {
   const t = target.trim();
   const lower = t.toLowerCase();
-  if (lower.startsWith("netease-yunxin:")) return t.slice("netease-yunxin:".length).trim();
-  if (lower.startsWith("nim:")) return t.slice("nim:".length).trim();
-  if (lower.startsWith("yunxin:")) return t.slice("yunxin:".length).trim();
-  return t;
+  let rest = t;
+  if (lower.startsWith("netease-yunxin:")) rest = t.slice("netease-yunxin:".length).trim();
+  else if (lower.startsWith("nim:")) rest = t.slice("nim:".length).trim();
+  else if (lower.startsWith("yunxin:")) rest = t.slice("yunxin:".length).trim();
+  if (rest.toLowerCase().startsWith("channel:")) {
+    const teamId = rest.slice(8).trim();
+    return teamId ? { teamId } : {};
+  }
+  if (rest.toLowerCase().startsWith("team:")) {
+    const teamId = rest.slice(5).trim();
+    return teamId ? { teamId } : {};
+  }
+  return rest ? { accid: rest } : {};
+}
+
+function toAccid(target: string): string {
+  const r = parseTarget(target);
+  return r.accid ?? "";
 }
 
 /** Send via SDK. Uses existing connection if channel is running; otherwise creates a temporary connection. */
@@ -27,9 +41,12 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
   accountId?: string | null;
 }): Promise<NeteaseYunxinSendResult> {
   const accountId = resolveAccountIdForSend(params.cfg, params.accountId);
-  const accid = toAccid(params.to);
-  if (!accid) {
-    return { ok: false, error: "Missing target accid" };
+  const { accid, teamId } = parseTarget(params.to);
+  if (!accid && !teamId) {
+    return {
+      ok: false,
+      error: "Missing target: use netease-yunxin:<accid> or netease-yunxin:channel:<teamId>",
+    };
   }
 
   let conn = getNimConnection(accountId);
@@ -66,7 +83,10 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
   }
 
   try {
-    return await conn.sendText(accid, params.text ?? "");
+    if (teamId) {
+      return await conn.sendTeamMessage(teamId, params.text ?? "");
+    }
+    return await conn.sendText(accid!, params.text ?? "");
   } finally {
     if (temporary) {
       await conn.destroy();

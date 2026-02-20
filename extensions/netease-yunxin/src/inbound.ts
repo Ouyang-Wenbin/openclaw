@@ -29,12 +29,13 @@ function isSenderAllowed(senderId: string, allowFrom: string[]): boolean {
 
 async function deliverNeteaseYunxinReply(params: {
   payload: { text?: string; mediaUrls?: string[]; mediaUrl?: string };
-  toAccid: string;
+  /** Full target: netease-yunxin:<accid> (DM) or netease-yunxin:channel:<teamId> (group). */
+  to: string;
   accountId: string;
   cfg: OpenClawConfig;
   statusSink?: (patch: { lastOutboundAt?: number }) => void;
 }): Promise<void> {
-  const { payload, toAccid, accountId, cfg, statusSink } = params;
+  const { payload, to, accountId, cfg, statusSink } = params;
   const text = payload.text ?? "";
   const mediaList = payload.mediaUrls?.length
     ? payload.mediaUrls
@@ -47,7 +48,7 @@ async function deliverNeteaseYunxinReply(params: {
       : text.trim()
     : mediaList.map((u) => `Attachment: ${u}`).join("\n");
   if (!combined.trim()) return;
-  await sendMessageNeteaseYunxinWithConfig({ cfg, to: toAccid, text: combined, accountId });
+  await sendMessageNeteaseYunxinWithConfig({ cfg, to, text: combined, accountId });
   statusSink?.({ lastOutboundAt: Date.now() });
 }
 
@@ -57,6 +58,8 @@ export type NeteaseYunxinInboundMessage = {
   text: string;
   messageId: string;
   timestamp: number;
+  conversationType?: "direct" | "channel";
+  teamId?: string;
 };
 
 export async function handleNeteaseYunxinInbound(params: {
@@ -148,11 +151,17 @@ export async function handleNeteaseYunxinInbound(params: {
     return;
   }
 
+  const isChannel = message.conversationType === "channel" && message.teamId;
+  const replyTo = isChannel
+    ? `netease-yunxin:channel:${message.teamId}`
+    : `netease-yunxin:${message.senderId}`;
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
     accountId: account.accountId,
-    peer: { kind: "direct", id: message.senderId },
+    peer: isChannel
+      ? { kind: "channel", id: message.teamId! }
+      : { kind: "direct", id: message.senderId },
   });
   runtime.log?.(`[netease-yunxin] inbound dispatch to agent session=${route.sessionKey}`);
 
@@ -181,11 +190,11 @@ export async function handleNeteaseYunxinInbound(params: {
     RawBody: rawBody,
     CommandBody: rawBody,
     From: `netease-yunxin:${message.senderId}`,
-    To: `netease-yunxin:${message.senderId}`,
+    To: replyTo,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
-    ChatType: "direct",
-    ConversationLabel: fromLabel,
+    ChatType: isChannel ? "channel" : "direct",
+    ConversationLabel: isChannel ? `channel:${message.teamId}` : fromLabel,
     SenderName: message.senderName,
     SenderId: message.senderId,
     Provider: CHANNEL_ID,
@@ -193,7 +202,7 @@ export async function handleNeteaseYunxinInbound(params: {
     MessageSid: message.messageId,
     Timestamp: message.timestamp,
     OriginatingChannel: CHANNEL_ID,
-    OriginatingTo: `netease-yunxin:${message.senderId}`,
+    OriginatingTo: replyTo,
     CommandAuthorized: commandGate.commandAuthorized,
   });
 
@@ -205,12 +214,13 @@ export async function handleNeteaseYunxinInbound(params: {
     updateLastRoute: {
       sessionKey: route.sessionKey,
       channel: CHANNEL_ID,
-      to: `netease-yunxin:${message.senderId}`,
+      to: replyTo,
       accountId: account.accountId,
     },
     onRecordError: (err) =>
       runtime.error?.(`[netease-yunxin] recordInboundSession: ${String(err)}`),
   });
+  runtime.log?.(`[netease-yunxin] inbound recordInboundSession done, dispatching reply`);
 
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg: config,
@@ -219,19 +229,21 @@ export async function handleNeteaseYunxinInbound(params: {
     accountId: account.accountId,
   });
 
+  runtime.log?.(`[netease-yunxin] inbound calling dispatchReplyWithBufferedBlockDispatcher`);
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: config,
     dispatcherOptions: {
       ...prefixOptions,
       deliver: async (payload) => {
+        runtime.log?.(`[netease-yunxin] inbound deliver callback invoked to=${replyTo}`);
         const t = (payload as { text?: string }).text ?? "";
         runtime.log?.(
-          `[netease-yunxin] inbound deliver reply to=${message.senderId} text=${t.slice(0, 50)}`,
+          `[netease-yunxin] inbound deliver reply to=${replyTo} text=${t.slice(0, 50)}`,
         );
         await deliverNeteaseYunxinReply({
           payload: payload as { text?: string; mediaUrls?: string[]; mediaUrl?: string },
-          toAccid: message.senderId,
+          to: replyTo,
           accountId: account.accountId,
           cfg: config,
           statusSink,
@@ -243,4 +255,5 @@ export async function handleNeteaseYunxinInbound(params: {
     },
     replyOptions: { onModelSelected },
   });
+  runtime.log?.(`[netease-yunxin] inbound dispatchReplyWithBufferedBlockDispatcher done`);
 }

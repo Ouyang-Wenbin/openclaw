@@ -13,6 +13,10 @@ export type NimConnection = {
     toAccid: string,
     text: string,
   ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  sendTeamMessage(
+    teamId: string,
+    text: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
   destroy(): Promise<void>;
 };
 
@@ -27,12 +31,17 @@ type V2NIMInitOption = {
   privateServerOption?: Record<string, unknown>;
 };
 
-/** V2NIMMessage from receiveMessages callback. */
+/** V2NIMMessage from receiveMessages callback. P2P: receiverId=our accid; team: conversationType=2, conversationId/sessionId=teamId. */
 type V2NIMMessage = {
   text?: string;
   senderId?: string;
   receiverId?: string;
   conversationId?: string;
+  /** 0 single, 2 team (group) */
+  conversationType?: number;
+  sessionId?: string;
+  /** @mention accids when present */
+  mentionAccids?: string[];
   clientMsgId?: string;
   serverMsgId?: string;
   createTime?: number;
@@ -62,6 +71,7 @@ type V2NIMClient = {
   } | null;
   conversationIdUtil?: {
     p2pConversationId(accountId: string): string;
+    teamConversationId?(teamId: string): string;
   } | null;
 };
 
@@ -154,13 +164,23 @@ function loadV2(runtime?: { error?: (msg: string) => void }): V2NIMClient | null
  * Create connection: V2 init + static token login per doc.
  * Caller must call destroy() on abort or channel stop.
  */
+/** Delivered to channel: direct (P2P) or channel (group with teamId). */
+export type NimInboundMessage = {
+  from: string;
+  text: string;
+  messageId: string;
+  timestamp: number;
+  conversationType: "direct" | "channel";
+  teamId?: string;
+};
+
 export async function createNimConnection(params: {
   accountId: string;
   appKey: string;
   accid: string;
   token: string;
   runtime: { log?: (msg: string) => void; error?: (msg: string) => void };
-  onMessage: (msg: { from: string; text: string; messageId: string; timestamp: number }) => void;
+  onMessage: (msg: NimInboundMessage) => void;
   statusSink?: (patch: { lastInboundAt?: number }) => void;
 }): Promise<NimConnection | null> {
   const { accountId, appKey, accid, token, runtime, onMessage, statusSink } = params;
@@ -215,6 +235,57 @@ export async function createNimConnection(params: {
 
   const dedupe = getDedupeState(accid);
 
+  const CONVERSATION_TYPE_TEAM = 2;
+  const isTeamMessage = (m: V2NIMMessage) => {
+    if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM) return true;
+    const sid = String(m.sessionId ?? "").trim();
+    const cid = String(m.conversationId ?? "").trim();
+    const rid = String(m.receiverId ?? "").trim();
+    if (sid && rid !== accid) return true;
+    if (cid && cid !== accid && cid !== rid) return true;
+    if (rid === accid && cid && cid !== accid) return true;
+    return false;
+  };
+  /** conversationId for team is often "accid|conversationType|teamId" (e.g. 025177|2|62071378227). */
+  const getTeamId = (m: V2NIMMessage) => {
+    const cid = String(m.conversationId ?? "").trim();
+    const sid = String(m.sessionId ?? "").trim();
+    if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM && cid) {
+      const parts = cid.split("|");
+      if (parts.length >= 3) return parts[2]!.trim();
+      if (cid && cid !== sid && sid !== "-") return sid;
+      return cid;
+    }
+    if (sid && sid !== "-") return sid;
+    return cid || undefined;
+  };
+  const isMentioned = (m: V2NIMMessage, ourAccid: string) => {
+    const mentions = m.mentionAccids;
+    if (Array.isArray(mentions) && mentions.some((id) => String(id).trim() === ourAccid))
+      return true;
+    const t = String(m.text ?? "");
+    if (
+      t.includes(`@${ourAccid}`) ||
+      t.includes(`@${ourAccid}\u2005`) ||
+      t.includes(`@${ourAccid} `)
+    )
+      return true;
+    if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM && t.includes("@")) return true;
+    return false;
+  };
+  const logSkip = (reason: string, m?: V2NIMMessage) => {
+    if (!m) {
+      runtime.log?.(`[netease-yunxin] skip: ${reason}`);
+      return;
+    }
+    const cid = String(m.conversationId ?? "").trim();
+    const sid = String(m.sessionId ?? "").trim();
+    const ct = m.conversationType;
+    runtime.log?.(
+      `[netease-yunxin] skip: ${reason} (conversationType=${ct} sessionId=${sid || "-"} conversationId=${cid || "-"} receiverId=${String(m.receiverId ?? "").trim() || "-"} senderId=${String(m.senderId ?? "").trim() || "-"} type=${m.type} text=${String(m.text ?? "").slice(0, 40)})`,
+    );
+  };
+
   let receiveHandler: ((messages: V2NIMMessage[]) => void) | null = null;
   if (messageService?.on) {
     receiveHandler = (messages: V2NIMMessage[]) => {
@@ -237,11 +308,8 @@ export async function createNimConnection(params: {
             type !== 5 &&
             type !== 6 &&
             type !== 10);
-        if (receiverId !== accid) {
-          skipped += 1;
-          continue;
-        }
         if (!isText) {
+          logSkip("not text", m);
           skipped += 1;
           continue;
         }
@@ -250,10 +318,87 @@ export async function createNimConnection(params: {
         const messageId = serverId || clientId || `sdk-${now}`;
         const timestamp = Number(m.createTime ?? Date.now());
         if (!from) {
+          logSkip("empty sender", m);
           skipped += 1;
           continue;
         }
-        // Skip our own sent messages (echo): when sender is us, if this id was recorded on send, filter out.
+        const team = isTeamMessage(m);
+        const teamId = team ? getTeamId(m) : undefined;
+
+        if (team) {
+          if (!teamId) {
+            logSkip("team but no teamId", m);
+            skipped += 1;
+            continue;
+          }
+          if (!isMentioned(m, accid)) {
+            logSkip("team not @mentioned", m);
+            skipped += 1;
+            continue;
+          }
+          const teamDedupe = getDedupeState(`team:${teamId}`);
+          const dedupeById = serverId || clientId;
+          if (dedupeById && teamDedupe.seenIds.has(dedupeById)) {
+            skipped += 1;
+            continue;
+          }
+          if (from === accid) {
+            const sentIds = getSentIds(accid);
+            if ((serverId && sentIds.has(serverId)) || (clientId && sentIds.has(clientId))) {
+              runtime.log?.(
+                `[netease-yunxin] skip own echo (team) messageId=${serverId || clientId}`,
+              );
+              skipped += 1;
+              continue;
+            }
+          }
+          const fromTextKey = `team:${teamId}:${from}:${text}`;
+          if (teamDedupe.processing.has(fromTextKey)) {
+            skipped += 1;
+            continue;
+          }
+          const lastAt = teamDedupe.recentFromText.get(fromTextKey);
+          if (lastAt != null && now - lastAt < DEDUPE_WINDOW_MS) {
+            skipped += 1;
+            continue;
+          }
+          teamDedupe.processing.add(fromTextKey);
+          if (dedupeById) teamDedupe.seenIds.add(dedupeById);
+          teamDedupe.recentFromText.set(fromTextKey, now);
+          setTimeout(() => teamDedupe.processing.delete(fromTextKey), PROCESSING_RELEASE_MS);
+          if (teamDedupe.recentFromText.size > 200) {
+            const cutoff = now - DEDUPE_WINDOW_MS * 2;
+            for (const [k, t] of teamDedupe.recentFromText) {
+              if (t < cutoff) teamDedupe.recentFromText.delete(k);
+            }
+          }
+          if (teamDedupe.seenIds.size > 500) {
+            const arr = [...teamDedupe.seenIds].slice(-300);
+            teamDedupe.seenIds.clear();
+            arr.forEach((id) => teamDedupe.seenIds.add(id));
+          }
+          accepted += 1;
+          statusSink?.({ lastInboundAt: Date.now() });
+          runtime.log?.(
+            `[netease-yunxin] RECV team=${teamId} from=${from} text=${text?.slice(0, 60) ?? ""}`,
+          );
+          const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+          onMessage({
+            from,
+            text,
+            messageId,
+            timestamp: tsMs,
+            conversationType: "channel",
+            teamId,
+          });
+          continue;
+        }
+
+        if (receiverId !== accid) {
+          logSkip("P2P receiverId not me", m);
+          skipped += 1;
+          continue;
+        }
         if (from === accid) {
           const sentIds = getSentIds(accid);
           if ((serverId && sentIds.has(serverId)) || (clientId && sentIds.has(clientId))) {
@@ -296,16 +441,22 @@ export async function createNimConnection(params: {
         statusSink?.({ lastInboundAt: Date.now() });
         runtime.log?.(`[netease-yunxin] RECV from=${from} text=${text?.slice(0, 80) ?? ""}`);
         const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
-        onMessage({ from, text, messageId, timestamp: tsMs });
+        onMessage({ from, text, messageId, timestamp: tsMs, conversationType: "direct" });
       }
       if (list.length > 0) {
         runtime.log?.(
           `[netease-yunxin] receiveMessages batch=${list.length} accepted=${accepted} skipped=${skipped}`,
         );
+        if (accepted === 0 && skipped > 0 && list[0]) {
+          const raw = list[0];
+          runtime.log?.(
+            `[netease-yunxin] first message raw: conversationType=${raw.conversationType} sessionId=${String(raw.sessionId ?? "").trim() || "-"} conversationId=${String(raw.conversationId ?? "").trim() || "-"} receiverId=${String(raw.receiverId ?? "").trim() || "-"} senderId=${String(raw.senderId ?? "").trim() || "-"} type=${raw.type} mentionAccids=${JSON.stringify(raw.mentionAccids)} text=${String(raw.text ?? "").slice(0, 60)}`,
+          );
+        }
       }
     };
     messageService.on("receiveMessages", receiveHandler);
-    runtime.log?.(`[netease-yunxin] listener registered receiver=${accid}`);
+    runtime.log?.(`[netease-yunxin] listener registered receiver=${accid} (P2P + team @mention)`);
   }
 
   const sendText = async (
@@ -350,6 +501,58 @@ export async function createNimConnection(params: {
     }
   };
 
+  const sendTeamMessage = async (
+    teamId: string,
+    text: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
+    if (!messageCreator?.createTextMessage || !messageService?.sendMessage || !conversationIdUtil) {
+      return {
+        ok: false,
+        error: "V2 messageService/messageCreator/conversationIdUtil not available",
+      };
+    }
+    const teamConvId =
+      typeof conversationIdUtil.teamConversationId === "function"
+        ? conversationIdUtil.teamConversationId(teamId)
+        : undefined;
+    if (!teamConvId) {
+      return {
+        ok: false,
+        error:
+          "node-nim conversationIdUtil.teamConversationId(teamId) not available; need SDK support for team send",
+      };
+    }
+    try {
+      const msg = messageCreator.createTextMessage(text);
+      if (!msg) {
+        return { ok: false, error: "createTextMessage returned null" };
+      }
+      runtime.log?.(`[netease-yunxin] SDK send team=${teamId} text=${text?.slice(0, 50)}`);
+      const SEND_TIMEOUT_MS = 25_000;
+      const sendPromise = messageService.sendMessage(msg, teamConvId, {}, null);
+      const sendTimeout = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`send timed out after ${SEND_TIMEOUT_MS / 1000}s`)),
+          SEND_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([sendPromise, sendTimeout]);
+      const outMsg = result?.message;
+      const messageId = outMsg?.serverMsgId ?? outMsg?.clientMsgId ?? `sdk-${Date.now()}`;
+      if (outMsg) {
+        const sid = String(outMsg.serverMsgId ?? "").trim();
+        const cid = String(outMsg.clientMsgId ?? "").trim();
+        if (sid) addSentMessageId(accid, sid);
+        if (cid) addSentMessageId(accid, cid);
+      }
+      runtime.log?.(`[netease-yunxin] SDK send team ok`);
+      return { ok: true, messageId };
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] SDK send team failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
+
   const destroy = async (): Promise<void> => {
     unregisterNimConnection(accountId);
     if (messageService?.off && receiveHandler) {
@@ -366,7 +569,7 @@ export async function createNimConnection(params: {
     }
   };
 
-  const conn: NimConnection = { sendText, destroy };
+  const conn: NimConnection = { sendText, sendTeamMessage, destroy };
   registerNimConnection(accountId, conn);
   runtime.log?.("[netease-yunxin] SDK connected");
   return conn;
