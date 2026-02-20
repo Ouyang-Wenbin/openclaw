@@ -153,6 +153,67 @@ openclaw onboard
 
 Full guide: [Getting Started](/start/getting-started)
 
+## Portable Windows package (x64 / x86)
+
+You can build a **portable package** that runs on native Windows (x64 or x86) without
+WSL. The package includes Node.js and the CLI; no separate Node install is required
+on the target machine.
+
+### Build from macOS (CI)
+
+You can produce the Windows package **from your Mac** using GitHub Actions (no Windows
+machine needed):
+
+1. Push your branch and open **Actions** → **Package Windows portable**.
+2. Click **Run workflow**, choose branch (e.g. `main`), optionally set **Target architecture** (`x64` or `x86`), then **Run workflow**.
+3. When the job finishes, open the run and download the **openclaw-win32-portable** artifact (contains **OpenClaw-&lt;version&gt;-setup.exe** and optional zip).
+4. Copy the setup exe to a Windows PC and run it to install; or use the zip for a portable folder and run `openclaw.cmd` from the extracted folder.
+
+The workflow also runs automatically on push to `main` when relevant files change (see
+`.github/workflows/package-windows.yml`). The Windows build runs on a Windows runner
+so native dependencies (e.g. `sharp`, `node-pty`) are built for Windows.
+
+### Build (on Windows)
+
+From the repo root, install [NSIS](https://nsis.sourceforge.io/) (e.g. `choco install nsis`), then run:
+
+```bash
+pnpm windows:installer
+```
+
+This runs `scripts/package-windows.mjs`: installs dependencies, builds the app, assembles a portable folder (with embedded Node), and runs **makensis** to produce **`dist/OpenClaw-<version>-setup.exe`**.
+
+Options (pass after the command):
+
+- `--arch x64` (default) or `--arch x86` — target architecture.
+- `--zip` — also create `dist/openclaw-win32-<arch>-<version>.zip`.
+- `--skip-node-bundle` — do not embed Node; `openclaw.cmd` will use `node` from PATH (smaller package, requires Node 22+ on the target machine).
+
+Examples:
+
+```bash
+pnpm windows:installer --zip
+pnpm windows:installer --arch x86 --zip
+pnpm windows:installer --skip-node-bundle
+```
+
+Output: **`dist/OpenClaw-<version>-setup.exe`** (NSIS installer). The portable folder is `dist/openclaw-win32-<arch>-<version>-node-<nodever>/` (or `-portable` if `--skip-node-bundle`), containing `openclaw.cmd`, `openclaw.mjs`, `dist/`, `node_modules/`, `extensions/`, `skills/`, and (when not using `--skip-node-bundle`) embedded `node/`. The installer copies that folder to Program Files, creates a desktop shortcut and Start menu entries, and registers an uninstaller.
+
+### Use on the target machine
+
+**Option A: Run the installer (recommended)**
+
+1. Copy **`OpenClaw-<version>-setup.exe`** to the Windows PC and run it.
+2. Choose install location (default: `C:\Program Files\OpenClaw`), complete the wizard.
+3. A desktop shortcut **OpenClaw** and Start menu **OpenClaw** folder are created. Double-click the shortcut or run `openclaw.cmd` from the install folder.
+4. Uninstall via **Settings → Apps → OpenClaw → Uninstall** or run **Uninstall OpenClaw** from the Start menu.
+
+**Option B: Portable folder or zip**
+
+1. Copy the folder (or unzip the package) to the Windows PC (x64 or x86 as built).
+2. Run **`openclaw.cmd`** (double-click or from a terminal: `openclaw.cmd --help`, `openclaw.cmd onboard`, `openclaw.cmd gateway run`).
+3. Config and data are stored under `%USERPROFILE%\.openclaw`.
+
 ## Windows companion app
 
 We do not have a Windows companion app yet. Contributions are welcome if you want

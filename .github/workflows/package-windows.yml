@@ -1,0 +1,91 @@
+# Build a portable Windows (x64) package on a Windows runner.
+# Trigger from the Actions tab (Run workflow) or on push to main.
+# Download the artifact from the run page and use the .zip on any Windows x64 machine.
+
+name: Package Windows portable
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target architecture"
+        required: false
+        default: "x64"
+        type: choice
+        options:
+          - x64
+          - x86
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "scripts/package-windows.mjs"
+      - "scripts/nsis/**"
+      - "src/**"
+      - "extensions/**"
+      - "tsdown.config.ts"
+      - ".github/workflows/package-windows.yml"
+
+concurrency:
+  group: package-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: blacksmith-16vcpu-windows-2025
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.x
+          check-latest: true
+
+      - name: Setup pnpm + cache store
+        uses: ./.github/actions/setup-pnpm-store-cache
+        with:
+          pnpm-version: "10.23.0"
+          cache-key-suffix: "node22"
+
+      - name: Runtime versions
+        shell: bash
+        run: |
+          node -v
+          pnpm -v
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          CI: true
+        run: |
+          NODE_BIN=$(dirname "$(node -p 'process.execPath')")
+          export PATH="$NODE_BIN:$PATH"
+          pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true || \
+          pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y
+
+      - name: Build Windows installer
+        shell: bash
+        run: |
+          export PATH="/c/Program Files (x86)/NSIS:$PATH"
+          pnpm windows:installer --arch "${{ github.event.inputs.arch || 'x64' }}" --zip
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-win32-portable
+          path: |
+            dist/openclaw-win32-*.zip
+            dist/openclaw-win32-*/
+            dist/OpenClaw-*-setup.exe
+          retention-days: 7
