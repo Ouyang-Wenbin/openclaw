@@ -155,6 +155,8 @@ export async function handleNeteaseYunxinInbound(params: {
   const replyTo = isChannel
     ? `netease-yunxin:channel:${message.teamId}`
     : `netease-yunxin:${message.senderId}`;
+  // Per-sender sessions (align with Feishu): when global session.dmScope is unset, use per-channel-peer so each sender gets a separate session.
+  const sessionCfg = config.session as { dmScope?: string } | undefined;
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
@@ -162,6 +164,7 @@ export async function handleNeteaseYunxinInbound(params: {
     peer: isChannel
       ? { kind: "channel", id: message.teamId! }
       : { kind: "direct", id: message.senderId },
+    dmScopeOverride: sessionCfg?.dmScope == null ? "per-channel-peer" : undefined,
   });
   runtime.log?.(`[netease-yunxin] inbound dispatch to agent session=${route.sessionKey}`);
 
@@ -229,31 +232,41 @@ export async function handleNeteaseYunxinInbound(params: {
     accountId: account.accountId,
   });
 
-  runtime.log?.(`[netease-yunxin] inbound calling dispatchReplyWithBufferedBlockDispatcher`);
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg: config,
-    dispatcherOptions: {
-      ...prefixOptions,
-      deliver: async (payload) => {
-        runtime.log?.(`[netease-yunxin] inbound deliver callback invoked to=${replyTo}`);
-        const t = (payload as { text?: string }).text ?? "";
-        runtime.log?.(
-          `[netease-yunxin] inbound deliver reply to=${replyTo} text=${t.slice(0, 50)}`,
-        );
-        await deliverNeteaseYunxinReply({
-          payload: payload as { text?: string; mediaUrls?: string[]; mediaUrl?: string },
-          to: replyTo,
-          accountId: account.accountId,
-          cfg: config,
-          statusSink,
-        });
+  runtime.log?.(
+    `[netease-yunxin] inbound calling dispatchReplyWithBufferedBlockDispatcher session=${route.sessionKey}`,
+  );
+  try {
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg: config,
+      dispatcherOptions: {
+        ...prefixOptions,
+        onReplyStart: async () => {
+          runtime.log?.(`[netease-yunxin] inbound agent reply started to=${replyTo}`);
+        },
+        deliver: async (payload) => {
+          runtime.log?.(`[netease-yunxin] inbound deliver callback invoked to=${replyTo}`);
+          const t = (payload as { text?: string }).text ?? "";
+          runtime.log?.(
+            `[netease-yunxin] inbound deliver reply to=${replyTo} text=${t.slice(0, 50)}`,
+          );
+          await deliverNeteaseYunxinReply({
+            payload: payload as { text?: string; mediaUrls?: string[]; mediaUrl?: string },
+            to: replyTo,
+            accountId: account.accountId,
+            cfg: config,
+            statusSink,
+          });
+        },
+        onError: (err, info) => {
+          runtime.error?.(`[netease-yunxin] reply failed: ${String(err)} (${info.kind})`);
+        },
       },
-      onError: (err, info) => {
-        runtime.error?.(`[netease-yunxin] reply failed: ${String(err)} (${info.kind})`);
-      },
-    },
-    replyOptions: { onModelSelected },
-  });
-  runtime.log?.(`[netease-yunxin] inbound dispatchReplyWithBufferedBlockDispatcher done`);
+      replyOptions: { onModelSelected },
+    });
+  } finally {
+    runtime.log?.(
+      `[netease-yunxin] inbound dispatchReplyWithBufferedBlockDispatcher done session=${route.sessionKey}`,
+    );
+  }
 }

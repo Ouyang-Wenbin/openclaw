@@ -44,6 +44,18 @@ describe("resolveAgentRoute", () => {
     expect(route.sessionKey).toBe("agent:main:whatsapp:direct:+15551234567");
   });
 
+  test("dmScopeOverride overrides config.session.dmScope for per-call scope", () => {
+    const cfg: OpenClawConfig = { session: { dmScope: "main" } };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "netease-yunxin",
+      accountId: null,
+      peer: { kind: "direct", id: "accid123" },
+      dmScopeOverride: "per-channel-peer",
+    });
+    expect(route.sessionKey).toBe("agent:main:netease-yunxin:direct:accid123");
+  });
+
   test("identityLinks collapses per-peer DM sessions across providers", () => {
     const cfg: OpenClawConfig = {
       session: {

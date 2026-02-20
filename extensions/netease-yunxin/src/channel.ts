@@ -166,6 +166,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
       enabled: account.enabled,
       configured: account.configured,
       running: runtime?.running ?? false,
+      connected: runtime?.connected,
       lastStartAt: runtime?.lastStartAt ?? null,
       lastStopAt: runtime?.lastStopAt ?? null,
       lastError: runtime?.lastError ?? null,
@@ -178,7 +179,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
         cfg: ctx.cfg as { channels?: Record<string, unknown> },
         accountId: ctx.accountId,
       });
-      const statusSink = (patch: { lastInboundAt?: number }) =>
+      const statusSink = (patch: { lastInboundAt?: number; connected?: boolean }) =>
         ctx.setStatus({ accountId: ctx.accountId, ...patch });
 
       if (!account.configured || !account.token?.trim()) {

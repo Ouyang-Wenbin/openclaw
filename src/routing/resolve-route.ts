@@ -2,6 +2,7 @@ import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import type { ChatType } from "../channels/chat-type.js";
 import { normalizeChatType } from "../channels/chat-type.js";
 import type { OpenClawConfig } from "../config/config.js";
+import type { DmScope } from "../config/types.base.js";
 import { shouldLogVerbose } from "../globals.js";
 import { logDebug } from "../logger.js";
 import { listBindings } from "./bindings.js";
@@ -33,6 +34,8 @@ export type ResolveAgentRouteInput = {
   teamId?: string | null;
   /** Discord member role IDs — used for role-based agent routing. */
   memberRoleIds?: string[];
+  /** Override session.dmScope for this channel (e.g. per-channel-peer so each sender gets a separate session). */
+  dmScopeOverride?: DmScope;
 };
 
 export type ResolvedAgentRoute = {
@@ -303,7 +306,7 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
 
   const bindings = getEvaluatedBindingsForChannelAccount(input.cfg, channel, accountId);
 
-  const dmScope = input.cfg.session?.dmScope ?? "main";
+  const dmScope = input.dmScopeOverride ?? input.cfg.session?.dmScope ?? "main";
   const identityLinks = input.cfg.session?.identityLinks;
 
   const choose = (agentId: string, matchedBy: ResolvedAgentRoute["matchedBy"]) => {

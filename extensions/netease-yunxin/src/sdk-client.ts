@@ -55,6 +55,9 @@ type V2NIMClient = {
   getLoginService(): {
     /** V2 API: returns Promise<void>; option can be {} or { timeout?, retryCount? }. */
     login(accountId: string, token: string, option: Record<string, unknown>): Promise<void>;
+    /** Connection state events: disconnected, kickedOffline, connectStatus (for health monitor restart). */
+    on?(event: string, cb: (...args: unknown[]) => void): void;
+    off?(event: string, cb: (...args: unknown[]) => void): void;
   };
   getMessageService(): {
     on(event: "receiveMessages", cb: (messages: V2NIMMessage[]) => void): void;
@@ -181,7 +184,8 @@ export async function createNimConnection(params: {
   token: string;
   runtime: { log?: (msg: string) => void; error?: (msg: string) => void };
   onMessage: (msg: NimInboundMessage) => void;
-  statusSink?: (patch: { lastInboundAt?: number }) => void;
+  /** Sink for runtime status; set connected: false on SDK disconnect so health monitor can restart channel. */
+  statusSink?: (patch: { lastInboundAt?: number; connected?: boolean }) => void;
 }): Promise<NimConnection | null> {
   const { accountId, appKey, accid, token, runtime, onMessage, statusSink } = params;
   const v2 = loadV2(runtime);
@@ -228,6 +232,41 @@ export async function createNimConnection(params: {
   }
 
   runtime.log?.("[netease-yunxin] SDK login ok");
+  statusSink?.({ connected: true });
+
+  // Listen for disconnect/kick so health monitor can restart channel and re-establish long connection.
+  // V2NIMConnectStatus: 0=Disconnected, 1=Connected, 2=Connecting, 3=Waiting.
+  const CONNECT_STATUS_CONNECTED = 1;
+  const bindConnectionListeners = () => {
+    if (!loginService?.on || !loginService?.off) return () => {};
+    const onDisconnected = () => {
+      runtime.log?.("[netease-yunxin] SDK disconnected; health monitor will restart channel");
+      statusSink?.({ connected: false });
+    };
+    const onKickedOffline = () => {
+      runtime.log?.("[netease-yunxin] SDK kicked offline; health monitor will restart channel");
+      statusSink?.({ connected: false });
+    };
+    const onConnectStatus = (status: unknown) => {
+      if (status !== CONNECT_STATUS_CONNECTED) {
+        runtime.log?.(`[netease-yunxin] SDK connectStatus=${status}; marking disconnected`);
+        statusSink?.({ connected: false });
+      }
+    };
+    loginService.on("disconnected", onDisconnected);
+    loginService.on("kickedOffline", onKickedOffline);
+    loginService.on("connectStatus", onConnectStatus);
+    return () => {
+      try {
+        loginService.off?.("disconnected", onDisconnected);
+        loginService.off?.("kickedOffline", onKickedOffline);
+        loginService.off?.("connectStatus", onConnectStatus);
+      } catch {
+        // ignore
+      }
+    };
+  };
+  const unbindConnectionListeners = bindConnectionListeners();
 
   const messageService = v2.getMessageService?.() ?? null;
   const messageCreator = v2.messageCreator ?? null;
@@ -235,17 +274,9 @@ export async function createNimConnection(params: {
 
   const dedupe = getDedupeState(accid);
 
+  // Only conversationType === 2 is team (group); 0/1 are P2P. Do not infer team from sessionId/conversationId.
   const CONVERSATION_TYPE_TEAM = 2;
-  const isTeamMessage = (m: V2NIMMessage) => {
-    if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM) return true;
-    const sid = String(m.sessionId ?? "").trim();
-    const cid = String(m.conversationId ?? "").trim();
-    const rid = String(m.receiverId ?? "").trim();
-    if (sid && rid !== accid) return true;
-    if (cid && cid !== accid && cid !== rid) return true;
-    if (rid === accid && cid && cid !== accid) return true;
-    return false;
-  };
+  const isTeamMessage = (m: V2NIMMessage) => Number(m.conversationType) === CONVERSATION_TYPE_TEAM;
   /** conversationId for team is often "accid|conversationType|teamId" (e.g. 025177|2|62071378227). */
   const getTeamId = (m: V2NIMMessage) => {
     const cid = String(m.conversationId ?? "").trim();
@@ -278,12 +309,10 @@ export async function createNimConnection(params: {
       runtime.log?.(`[netease-yunxin] skip: ${reason}`);
       return;
     }
-    const cid = String(m.conversationId ?? "").trim();
-    const sid = String(m.sessionId ?? "").trim();
     const ct = m.conversationType;
-    runtime.log?.(
-      `[netease-yunxin] skip: ${reason} (conversationType=${ct} sessionId=${sid || "-"} conversationId=${cid || "-"} receiverId=${String(m.receiverId ?? "").trim() || "-"} senderId=${String(m.senderId ?? "").trim() || "-"} type=${m.type} text=${String(m.text ?? "").slice(0, 40)})`,
-    );
+    const from = String(m.senderId ?? "").trim() || "-";
+    const text = String(m.text ?? "").slice(0, 30);
+    runtime.log?.(`[netease-yunxin] skip: ${reason} (conv=${ct} from=${from} text=${text})`);
   };
 
   let receiveHandler: ((messages: V2NIMMessage[]) => void) | null = null;
@@ -325,6 +354,7 @@ export async function createNimConnection(params: {
         const team = isTeamMessage(m);
         const teamId = team ? getTeamId(m) : undefined;
 
+        // Team (group): only process when we are @mentioned. DM (P2P): process all (own echo skipped by sentIds).
         if (team) {
           if (!teamId) {
             logSkip("team but no teamId", m);
@@ -443,16 +473,10 @@ export async function createNimConnection(params: {
         const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
         onMessage({ from, text, messageId, timestamp: tsMs, conversationType: "direct" });
       }
-      if (list.length > 0) {
+      if (list.length > 0 && (accepted > 0 || skipped > 0)) {
         runtime.log?.(
-          `[netease-yunxin] receiveMessages batch=${list.length} accepted=${accepted} skipped=${skipped}`,
+          `[netease-yunxin] receiveMessages n=${list.length} accepted=${accepted} skipped=${skipped}`,
         );
-        if (accepted === 0 && skipped > 0 && list[0]) {
-          const raw = list[0];
-          runtime.log?.(
-            `[netease-yunxin] first message raw: conversationType=${raw.conversationType} sessionId=${String(raw.sessionId ?? "").trim() || "-"} conversationId=${String(raw.conversationId ?? "").trim() || "-"} receiverId=${String(raw.receiverId ?? "").trim() || "-"} senderId=${String(raw.senderId ?? "").trim() || "-"} type=${raw.type} mentionAccids=${JSON.stringify(raw.mentionAccids)} text=${String(raw.text ?? "").slice(0, 60)}`,
-          );
-        }
       }
     };
     messageService.on("receiveMessages", receiveHandler);
@@ -554,6 +578,7 @@ export async function createNimConnection(params: {
   };
 
   const destroy = async (): Promise<void> => {
+    unbindConnectionListeners();
     unregisterNimConnection(accountId);
     if (messageService?.off && receiveHandler) {
       try {
