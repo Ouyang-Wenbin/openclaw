@@ -93,3 +93,15 @@ export function clearDeviceAuthToken(params: { deviceId: string; role: string })
   delete next.tokens[role];
   writeStore(next);
 }
+
+/** Synchronously clear the operator token from current store (used on device_token_mismatch so next connect does not resend stale token). */
+export function clearOperatorTokenIfStored(): void {
+  const store = readStore();
+  const role = normalizeDeviceAuthRole("operator");
+  if (!store?.deviceId || !store.tokens?.[role]) {
+    return;
+  }
+  const next = { ...store, tokens: { ...store.tokens } };
+  delete next.tokens[role];
+  writeStore(next);
+}

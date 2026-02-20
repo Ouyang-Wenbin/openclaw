@@ -1,0 +1,35 @@
+{
+  "name": "@openclaw/netease-yunxin",
+  "version": "2026.2.17",
+  "description": "OpenClaw NetEase Yunxin IM channel plugin",
+  "type": "module",
+  "dependencies": {
+    "node-nim": "10.9.76"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "netease-yunxin",
+      "label": "网易云信 IM",
+      "selectionLabel": "网易云信 IM (NIM)",
+      "docsPath": "/channels/netease-yunxin",
+      "docsLabel": "netease-yunxin",
+      "blurb": "NetEase Yunxin IM (NIM) for message send and receive.",
+      "aliases": [
+        "yunxin",
+        "nim"
+      ],
+      "order": 70
+    },
+    "install": {
+      "npmSpec": "@openclaw/netease-yunxin",
+      "localPath": "extensions/netease-yunxin",
+      "defaultChoice": "npm"
+    }
+  }
+}

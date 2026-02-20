@@ -1,0 +1,9 @@
+{
+  "id": "netease-yunxin",
+  "channels": ["netease-yunxin"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -5,7 +5,12 @@ import {
   type GatewayClientMode,
   type GatewayClientName,
 } from "../../../src/gateway/protocol/client-info.js";
-import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth.ts";
+import {
+  clearDeviceAuthToken,
+  clearOperatorTokenIfStored,
+  loadDeviceAuthToken,
+  storeDeviceAuthToken,
+} from "./device-auth.ts";
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity.ts";
 import { generateUUID } from "./uuid.ts";
 
@@ -100,6 +105,9 @@ export class GatewayBrowserClient {
     this.ws.addEventListener("close", (ev) => {
       const reason = String(ev.reason ?? "");
       this.ws = null;
+      if (ev.code === 1008 && reason.toLowerCase().includes("device token mismatch")) {
+        clearOperatorTokenIfStored();
+      }
       this.flushPending(new Error(`gateway closed (${ev.code}): ${reason}`));
       this.opts.onClose?.({ code: ev.code, reason });
       this.scheduleReconnect();

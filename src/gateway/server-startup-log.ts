@@ -2,6 +2,7 @@ import chalk from "chalk";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { resolveConfiguredModelRef } from "../agents/model-selection.js";
 import type { loadConfig } from "../config/config.js";
+import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { getResolvedLoggerSettings } from "../logging.js";
 
 export function logGatewayStartup(params: {
@@ -34,6 +35,13 @@ export function logGatewayStartup(params: {
     params.log.info(`listening on ${scheme}://${formatHost(host)}:${params.port}`);
   }
   params.log.info(`log file: ${getResolvedLoggerSettings().file}`);
+  try {
+    const configPath = resolveConfigPath();
+    const stateDir = resolveStateDir();
+    params.log.info(`config: ${configPath} stateDir: ${stateDir}`);
+  } catch (err) {
+    params.log.info(`config/stateDir: (resolve failed) ${String(err)}`);
+  }
   if (params.isNixMode) {
     params.log.info("gateway: running in Nix mode (config managed externally)");
   }

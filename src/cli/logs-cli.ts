@@ -28,6 +28,7 @@ type LogsCliOptions = {
   plain?: boolean;
   color?: boolean;
   localTime?: boolean;
+  utc?: boolean;
   url?: string;
   token?: string;
   timeout?: string;
@@ -206,7 +207,8 @@ export function registerLogsCli(program: Command) {
     .option("--json", "Emit JSON log lines", false)
     .option("--plain", "Plain text output (no ANSI styling)", false)
     .option("--no-color", "Disable ANSI colors")
-    .option("--local-time", "Display timestamps in local timezone", false)
+    .option("--local-time", "Display timestamps in local timezone (default)", true)
+    .option("--utc", "Display timestamps in UTC instead of local time", false)
     .addHelpText(
       "after",
       () =>
@@ -223,7 +225,7 @@ export function registerLogsCli(program: Command) {
     const jsonMode = Boolean(opts.json);
     const pretty = !jsonMode && Boolean(process.stdout.isTTY) && !opts.plain;
     const rich = isRich() && opts.color !== false;
-    const localTime = Boolean(opts.localTime);
+    const localTime = opts.utc ? false : Boolean(opts.localTime);
 
     while (true) {
       let payload: LogsTailPayload;

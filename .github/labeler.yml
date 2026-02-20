@@ -46,6 +46,11 @@
       - any-glob-to-any-file:
           - "extensions/mattermost/**"
           - "docs/channels/mattermost.md"
+"channel: netease-yunxin":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/netease-yunxin/**"
+          - "docs/channels/netease-yunxin.md"
 "channel: msteams":
   - changed-files:
       - any-glob-to-any-file:
