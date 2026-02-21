@@ -234,6 +234,11 @@ export async function createNimConnection(params: {
   runtime.log?.("[netease-yunxin] SDK login ok");
   statusSink?.({ connected: true });
 
+  // Only process messages received after connection ready. NetEase SDK syncs offline/roaming
+  // messages on login; without this guard, a fresh deploy/restart would process all of them.
+  const connectionReadyAtMs = Date.now();
+  const STARTUP_SKIP_GRACE_MS = 10_000; // Allow 10s clock skew
+
   // Listen for disconnect/kick so health monitor can restart channel and re-establish long connection.
   // V2NIMConnectStatus: 0=Disconnected, 1=Connected, 2=Connecting, 3=Waiting.
   const CONNECT_STATUS_CONNECTED = 1;
@@ -346,6 +351,12 @@ export async function createNimConnection(params: {
         const clientId = String(m.clientMsgId ?? "").trim();
         const messageId = serverId || clientId || `sdk-${now}`;
         const timestamp = Number(m.createTime ?? Date.now());
+        const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+        if (tsMs < connectionReadyAtMs - STARTUP_SKIP_GRACE_MS) {
+          logSkip("before connection ready (startup guard)", m);
+          skipped += 1;
+          continue;
+        }
         if (!from) {
           logSkip("empty sender", m);
           skipped += 1;
@@ -412,7 +423,6 @@ export async function createNimConnection(params: {
           runtime.log?.(
             `[netease-yunxin] RECV team=${teamId} from=${from} text=${text?.slice(0, 60) ?? ""}`,
           );
-          const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
           onMessage({
             from,
             text,
@@ -470,7 +480,6 @@ export async function createNimConnection(params: {
         accepted += 1;
         statusSink?.({ lastInboundAt: Date.now() });
         runtime.log?.(`[netease-yunxin] RECV from=${from} text=${text?.slice(0, 80) ?? ""}`);
-        const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
         onMessage({ from, text, messageId, timestamp: tsMs, conversationType: "direct" });
       }
       if (list.length > 0 && (accepted > 0 || skipped > 0)) {
