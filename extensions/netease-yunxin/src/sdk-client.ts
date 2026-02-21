@@ -234,10 +234,10 @@ export async function createNimConnection(params: {
   runtime.log?.("[netease-yunxin] SDK login ok");
   statusSink?.({ connected: true });
 
-  // Only process messages received after connection ready. NetEase SDK syncs offline/roaming
-  // messages on login; without this guard, a fresh deploy/restart would process all of them.
+  // Only process messages with createTime at or after connection ready. SDK syncs offline/roaming
+  // messages on login; without this guard, a fresh deploy/restart would process old messages.
   const connectionReadyAtMs = Date.now();
-  const STARTUP_SKIP_GRACE_MS = 10_000; // Allow 10s clock skew
+  const CLOCK_SKEW_GRACE_MS = 1000; // 1s grace for server/client clock skew
 
   // Listen for disconnect/kick so health monitor can restart channel and re-establish long connection.
   // V2NIMConnectStatus: 0=Disconnected, 1=Connected, 2=Connecting, 3=Waiting.
@@ -295,6 +295,7 @@ export async function createNimConnection(params: {
     if (sid && sid !== "-") return sid;
     return cid || undefined;
   };
+  /** Group: only when our accid is explicitly @mentioned (mentionAccids or @ourAccid in text). No fallback on any "@". */
   const isMentioned = (m: V2NIMMessage, ourAccid: string) => {
     const mentions = m.mentionAccids;
     if (Array.isArray(mentions) && mentions.some((id) => String(id).trim() === ourAccid))
@@ -306,7 +307,6 @@ export async function createNimConnection(params: {
       t.includes(`@${ourAccid} `)
     )
       return true;
-    if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM && t.includes("@")) return true;
     return false;
   };
   const logSkip = (reason: string, m?: V2NIMMessage) => {
@@ -352,7 +352,7 @@ export async function createNimConnection(params: {
         const messageId = serverId || clientId || `sdk-${now}`;
         const timestamp = Number(m.createTime ?? Date.now());
         const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
-        if (tsMs < connectionReadyAtMs - STARTUP_SKIP_GRACE_MS) {
+        if (tsMs < connectionReadyAtMs - CLOCK_SKEW_GRACE_MS) {
           logSkip("before connection ready (startup guard)", m);
           skipped += 1;
           continue;
