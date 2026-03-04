@@ -196,6 +196,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
           appKey: account.appKey,
           accid: account.nimAccountId,
           token: account.token,
+          mentionDisplayNames: account.config.mentionDisplayNames,
           runtime: ctx.runtime,
           statusSink,
           onMessage: (msg) => {

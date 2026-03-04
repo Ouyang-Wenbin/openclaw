@@ -182,12 +182,15 @@ export async function createNimConnection(params: {
   appKey: string;
   accid: string;
   token: string;
+  /** When set, group messages whose text contains @<name> are also treated as mentioning us (client may show display name instead of accid). */
+  mentionDisplayNames?: string[];
   runtime: { log?: (msg: string) => void; error?: (msg: string) => void };
   onMessage: (msg: NimInboundMessage) => void;
   /** Sink for runtime status; set connected: false on SDK disconnect so health monitor can restart channel. */
   statusSink?: (patch: { lastInboundAt?: number; connected?: boolean }) => void;
 }): Promise<NimConnection | null> {
-  const { accountId, appKey, accid, token, runtime, onMessage, statusSink } = params;
+  const { accountId, appKey, accid, token, mentionDisplayNames, runtime, onMessage, statusSink } =
+    params;
   const v2 = loadV2(runtime);
   if (!v2) return null;
 
@@ -295,7 +298,7 @@ export async function createNimConnection(params: {
     if (sid && sid !== "-") return sid;
     return cid || undefined;
   };
-  /** Group: only when our accid is explicitly @mentioned (mentionAccids or @ourAccid in text). No fallback on any "@". */
+  /** Group: only when our accid is explicitly @mentioned (mentionAccids or @ourAccid in text, or @displayName when mentionDisplayNames set). */
   const isMentioned = (m: V2NIMMessage, ourAccid: string) => {
     const mentions = m.mentionAccids;
     if (Array.isArray(mentions) && mentions.some((id) => String(id).trim() === ourAccid))
@@ -307,6 +310,16 @@ export async function createNimConnection(params: {
       t.includes(`@${ourAccid} `)
     )
       return true;
+    if (mentionDisplayNames?.length) {
+      for (const name of mentionDisplayNames) {
+        if (!name?.trim()) continue;
+        const needle = `@${name.trim()}`;
+        const idx = t.indexOf(needle);
+        if (idx === -1) continue;
+        const next = t[idx + needle.length];
+        if (next === undefined || next === " " || next === "\u2005" || next === "(") return true;
+      }
+    }
     return false;
   };
   const logSkip = (reason: string, m?: V2NIMMessage) => {
@@ -373,7 +386,14 @@ export async function createNimConnection(params: {
             continue;
           }
           if (!isMentioned(m, accid)) {
-            logSkip("team not @mentioned", m);
+            const mentions = m.mentionAccids;
+            const mentionInfo =
+              Array.isArray(mentions) && mentions.length > 0
+                ? ` mentionAccids=[${mentions.join(",")}]`
+                : " mentionAccids=absent";
+            runtime.log?.(
+              `[netease-yunxin] skip: team not @mentioned (conv=${m.conversationType} from=${from} text=${text}${mentionInfo})`,
+            );
             skipped += 1;
             continue;
           }
