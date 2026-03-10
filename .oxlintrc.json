@@ -35,5 +35,20 @@
     "src/canvas-host/a2ui/a2ui.bundle.js",
     "Swabble/",
     "vendor/"
+  ],
+  "overrides": [
+    {
+      "files": ["src/shared/net/ip.ts"],
+      "rules": {
+        "typescript/no-redundant-type-constituents": "off",
+        "typescript/no-duplicate-type-constituents": "off"
+      }
+    },
+    {
+      "files": ["src/agents/auth-profiles/oauth.ts", "src/commands/openai-codex-oauth.ts"],
+      "rules": {
+        "typescript/no-redundant-type-constituents": "off"
+      }
+    }
   ]
 }
