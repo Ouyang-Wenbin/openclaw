@@ -42,6 +42,10 @@ type V2NIMMessage = {
   sessionId?: string;
   /** @mention accids when present */
   mentionAccids?: string[];
+  /** Optional JSON string, e.g. {"hait":["025177"],...}. Cloud uses hait for @mentioned accids when body shows display name. */
+  ext?: string;
+  /** node-nim SDK: serverExtension (object or string) may contain @mention accids, e.g. { ext: "{\"hait\":[\"025177\"]}" } or direct hait array. */
+  serverExtension?: unknown;
   clientMsgId?: string;
   serverMsgId?: string;
   createTime?: number;
@@ -182,15 +186,12 @@ export async function createNimConnection(params: {
   appKey: string;
   accid: string;
   token: string;
-  /** When set, group messages whose text contains @<name> are also treated as mentioning us (client may show display name instead of accid). */
-  mentionDisplayNames?: string[];
   runtime: { log?: (msg: string) => void; error?: (msg: string) => void };
   onMessage: (msg: NimInboundMessage) => void;
   /** Sink for runtime status; set connected: false on SDK disconnect so health monitor can restart channel. */
   statusSink?: (patch: { lastInboundAt?: number; connected?: boolean }) => void;
 }): Promise<NimConnection | null> {
-  const { accountId, appKey, accid, token, mentionDisplayNames, runtime, onMessage, statusSink } =
-    params;
+  const { accountId, appKey, accid, token, runtime, onMessage, statusSink } = params;
   const v2 = loadV2(runtime);
   if (!v2) return null;
 
@@ -298,11 +299,34 @@ export async function createNimConnection(params: {
     if (sid && sid !== "-") return sid;
     return cid || undefined;
   };
-  /** Group: only when our accid is explicitly @mentioned (mentionAccids or @ourAccid in text, or @displayName when mentionDisplayNames set). */
+  /** True if our accid is @mentioned. SDK may use mentionAccids, or serverExtension (object/string) with hait array, or ext string with hait; body often shows display name (e.g. @欧阳文斌). */
   const isMentioned = (m: V2NIMMessage, ourAccid: string) => {
     const mentions = m.mentionAccids;
     if (Array.isArray(mentions) && mentions.some((id) => String(id).trim() === ourAccid))
       return true;
+    const tryHait = (obj: unknown): boolean => {
+      if (obj == null) return false;
+      const o =
+        typeof obj === "string"
+          ? (() => {
+              try {
+                return JSON.parse(obj) as Record<string, unknown>;
+              } catch {
+                return null;
+              }
+            })()
+          : (obj as Record<string, unknown>);
+      if (!o || typeof o !== "object") return false;
+      const hait = o.hait;
+      if (Array.isArray(hait) && hait.some((id: unknown) => String(id).trim() === ourAccid))
+        return true;
+      const extStr = o.ext;
+      if (typeof extStr === "string" && extStr.trim()) return tryHait(extStr);
+      return false;
+    };
+    if (tryHait(m.serverExtension)) return true;
+    const extRaw = m.ext;
+    if (typeof extRaw === "string" && extRaw.trim() && tryHait(extRaw)) return true;
     const t = String(m.text ?? "");
     if (
       t.includes(`@${ourAccid}`) ||
@@ -310,16 +334,6 @@ export async function createNimConnection(params: {
       t.includes(`@${ourAccid} `)
     )
       return true;
-    if (mentionDisplayNames?.length) {
-      for (const name of mentionDisplayNames) {
-        if (!name?.trim()) continue;
-        const needle = `@${name.trim()}`;
-        const idx = t.indexOf(needle);
-        if (idx === -1) continue;
-        const next = t[idx + needle.length];
-        if (next === undefined || next === " " || next === "\u2005" || next === "(") return true;
-      }
-    }
     return false;
   };
   const logSkip = (reason: string, m?: V2NIMMessage) => {
@@ -378,22 +392,20 @@ export async function createNimConnection(params: {
         const team = isTeamMessage(m);
         const teamId = team ? getTeamId(m) : undefined;
 
-        // Team (group): only process when we are @mentioned. DM (P2P): process all (own echo skipped by sentIds).
+        // Team (group): only process when you @mention yourself (from === accid && isMentioned). P2P: only process when you DM yourself (from === accid).
         if (team) {
           if (!teamId) {
             logSkip("team but no teamId", m);
             skipped += 1;
             continue;
           }
+          if (from !== accid) {
+            logSkip("team: only process when you @yourself (sender not self)", m);
+            skipped += 1;
+            continue;
+          }
           if (!isMentioned(m, accid)) {
-            const mentions = m.mentionAccids;
-            const mentionInfo =
-              Array.isArray(mentions) && mentions.length > 0
-                ? ` mentionAccids=[${mentions.join(",")}]`
-                : " mentionAccids=absent";
-            runtime.log?.(
-              `[netease-yunxin] skip: team not @mentioned (conv=${m.conversationType} from=${from} text=${text}${mentionInfo})`,
-            );
+            logSkip("team: only process when you @yourself (not @mentioned)", m);
             skipped += 1;
             continue;
           }
@@ -402,16 +414,6 @@ export async function createNimConnection(params: {
           if (dedupeById && teamDedupe.seenIds.has(dedupeById)) {
             skipped += 1;
             continue;
-          }
-          if (from === accid) {
-            const sentIds = getSentIds(accid);
-            if ((serverId && sentIds.has(serverId)) || (clientId && sentIds.has(clientId))) {
-              runtime.log?.(
-                `[netease-yunxin] skip own echo (team) messageId=${serverId || clientId}`,
-              );
-              skipped += 1;
-              continue;
-            }
           }
           const fromTextKey = `team:${teamId}:${from}:${text}`;
           if (teamDedupe.processing.has(fromTextKey)) {
@@ -459,13 +461,16 @@ export async function createNimConnection(params: {
           skipped += 1;
           continue;
         }
-        if (from === accid) {
-          const sentIds = getSentIds(accid);
-          if ((serverId && sentIds.has(serverId)) || (clientId && sentIds.has(clientId))) {
-            runtime.log?.(`[netease-yunxin] skip own echo messageId=${serverId || clientId}`);
-            skipped += 1;
-            continue;
-          }
+        if (from !== accid) {
+          logSkip("P2P sender not self", m);
+          skipped += 1;
+          continue;
+        }
+        const sentIds = getSentIds(accid);
+        if ((serverId && sentIds.has(serverId)) || (clientId && sentIds.has(clientId))) {
+          runtime.log?.(`[netease-yunxin] skip own echo messageId=${serverId || clientId}`);
+          skipped += 1;
+          continue;
         }
         const dedupeById = serverId || clientId;
         if (dedupeById && dedupe.seenIds.has(dedupeById)) {
@@ -509,7 +514,9 @@ export async function createNimConnection(params: {
       }
     };
     messageService.on("receiveMessages", receiveHandler);
-    runtime.log?.(`[netease-yunxin] listener registered receiver=${accid} (P2P + team @mention)`);
+    runtime.log?.(
+      `[netease-yunxin] listener registered receiver=${accid} (team: only when you @yourself; P2P: only when you DM yourself)`,
+    );
   }
 
   const sendText = async (

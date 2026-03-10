@@ -9,8 +9,6 @@ const NeteaseYunxinAccountSchemaBase = z
     enabled: z.boolean().optional(),
     allowFrom: z.array(z.string()).optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
-    /** Group @mention: also match when message text contains @<name> (display name in client). */
-    mentionDisplayNames: z.array(z.string()).optional(),
   })
   .strict();
 

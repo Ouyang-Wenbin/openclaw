@@ -9,8 +9,6 @@ export type NeteaseYunxinAccountConfig = {
   enabled?: boolean;
   allowFrom?: string[];
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
-  /** Group @mention: also treat message as mentioning us when text contains @<name>. Use when client shows display name (e.g. 欧阳文斌) instead of accid in @. */
-  mentionDisplayNames?: string[];
 };
 
 export type NeteaseYunxinConfig = NeteaseYunxinAccountConfig & {
