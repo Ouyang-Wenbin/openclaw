@@ -9,6 +9,8 @@ export type NeteaseYunxinAccountConfig = {
   enabled?: boolean;
   allowFrom?: string[];
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
+  /** Max size (MB) for inbound image download; default 10. */
+  mediaMaxMb?: number;
 };
 
 export type NeteaseYunxinConfig = NeteaseYunxinAccountConfig & {

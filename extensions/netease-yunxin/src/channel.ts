@@ -207,6 +207,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
                 timestamp: msg.timestamp,
                 conversationType: msg.conversationType,
                 teamId: msg.teamId,
+                imageUrl: msg.imageUrl,
               },
               account,
               config: ctx.cfg,

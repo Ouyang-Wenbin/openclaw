@@ -60,6 +60,8 @@ export type NeteaseYunxinInboundMessage = {
   timestamp: number;
   conversationType?: "direct" | "channel";
   teamId?: string;
+  /** Image URL from PICTURE message (type=1); fetched and passed to model. */
+  imageUrl?: string;
 };
 
 export async function handleNeteaseYunxinInbound(params: {
@@ -71,16 +73,39 @@ export async function handleNeteaseYunxinInbound(params: {
 }): Promise<void> {
   const { message, account, config, runtime, statusSink } = params;
   const core = getNeteaseYunxinRuntime();
-  const rawBody = message.text?.trim() ?? "";
+  const rawBody = message.text?.trim() || (message.imageUrl ? "<media:image>" : "");
   if (!rawBody) {
     runtime.log?.(`[netease-yunxin] inbound drop empty from=${message.senderId}`);
     return;
   }
   runtime.log?.(
-    `[netease-yunxin] inbound from=${message.senderId} body=${rawBody.slice(0, 60)}${rawBody.length > 60 ? "…" : ""}`,
+    `[netease-yunxin] inbound from=${message.senderId} body=${rawBody.slice(0, 60)}${rawBody.length > 60 ? "…" : ""}${message.imageUrl ? " [image]" : ""}`,
   );
 
   statusSink?.({ lastInboundAt: message.timestamp });
+
+  let mediaPath: string | undefined;
+  let mediaType: string | undefined;
+  if (message.imageUrl) {
+    try {
+      const maxBytes = (account.config.mediaMaxMb ?? 10) * 1024 * 1024;
+      const fetched = await core.channel.media.fetchRemoteMedia({
+        url: message.imageUrl,
+        maxBytes,
+      });
+      const saved = await core.channel.media.saveMediaBuffer(
+        fetched.buffer,
+        fetched.contentType,
+        "inbound",
+        maxBytes,
+      );
+      mediaPath = saved.path;
+      mediaType = saved.contentType;
+      runtime.log?.(`[netease-yunxin] inbound image saved path=${mediaPath}`);
+    } catch (err) {
+      runtime.error?.(`[netease-yunxin] inbound image fetch failed: ${String(err)}`);
+    }
+  }
 
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   const configAllowFrom = normalizeAllowlist(account.config.allowFrom);
@@ -207,6 +232,7 @@ export async function handleNeteaseYunxinInbound(params: {
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: replyTo,
     CommandAuthorized: commandGate.commandAuthorized,
+    ...(mediaPath ? { MediaPath: mediaPath, MediaType: mediaType, MediaUrl: mediaPath } : {}),
   });
 
   await core.channel.session.recordInboundSession({

@@ -39,6 +39,12 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
   to: string;
   text: string;
   accountId?: string | null;
+  /** Local path to image file for PICTURE message (uses createImageMessage when available). */
+  imagePath?: string;
+  /** Optional image name and dimensions for createImageMessage(imagePath, name, sceneName, width, height). */
+  imageName?: string;
+  imageWidth?: number;
+  imageHeight?: number;
 }): Promise<NeteaseYunxinSendResult> {
   const accountId = resolveAccountIdForSend(params.cfg, params.accountId);
   const { accid, teamId } = parseTarget(params.to);
@@ -83,6 +89,20 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
   }
 
   try {
+    if (params.imagePath) {
+      const imageOpts =
+        params.imageName != null || params.imageWidth != null || params.imageHeight != null
+          ? {
+              name: params.imageName,
+              width: params.imageWidth,
+              height: params.imageHeight,
+            }
+          : undefined;
+      if (teamId) {
+        return await conn.sendTeamImage(teamId, params.imagePath, imageOpts);
+      }
+      return await conn.sendImage(accid!, params.imagePath, imageOpts);
+    }
     if (teamId) {
       return await conn.sendTeamMessage(teamId, params.text ?? "");
     }

@@ -9,6 +9,8 @@ const NeteaseYunxinAccountSchemaBase = z
     enabled: z.boolean().optional(),
     allowFrom: z.array(z.string()).optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
+    /** Max size (MB) for inbound image download; default 10. */
+    mediaMaxMb: z.number().optional(),
   })
   .strict();
 

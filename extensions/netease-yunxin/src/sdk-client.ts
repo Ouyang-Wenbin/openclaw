@@ -1,10 +1,11 @@
+import { createRequire } from "node:module";
 /**
  * NetEase Yunxin node-nim SDK wrapper (V10).
  * Initialization and login: https://doc.yunxin.163.com/messaging2/guide/zA0ODU5Mzk
  * Message收发: https://doc.yunxin.163.com/messaging2/guide/收发消息
  * Uses V2NIMClient: getMessageService().on('receiveMessages'), messageCreator.createTextMessage, sendMessage.
  */
-import { createRequire } from "node:module";
+import path from "node:path";
 
 const require = createRequire(import.meta.url);
 
@@ -16,6 +17,17 @@ export type NimConnection = {
   sendTeamMessage(
     teamId: string,
     text: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  /** Send PICTURE message from local image file path (uses createImageMessage(imagePath, name, sceneName, width, height)). */
+  sendImage(
+    toAccid: string,
+    imagePath: string,
+    opts?: { name?: string; width?: number; height?: number },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  sendTeamImage(
+    teamId: string,
+    imagePath: string,
+    opts?: { name?: string; width?: number; height?: number },
   ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
   destroy(): Promise<void>;
 };
@@ -29,6 +41,26 @@ type V2NIMInitOption = {
   databaseOption?: Record<string, unknown>;
   fcsOption?: Record<string, unknown>;
   privateServerOption?: Record<string, unknown>;
+};
+
+/** PICTURE message attach (JSON): url, md5, size, ext, w, h, etc. */
+type NIMAttachImage = {
+  url?: string;
+  md5?: string;
+  name?: string;
+  size?: number;
+  ext?: string;
+  w?: number;
+  h?: number;
+  [k: string]: unknown;
+};
+
+/** node-nim attachment object (messageType=1): url, raw JSON string, etc. */
+type NIMAttachment = {
+  url?: string;
+  raw?: string;
+  attachmentType?: number;
+  [k: string]: unknown;
 };
 
 /** V2NIMMessage from receiveMessages callback. P2P: receiverId=our accid; team: conversationType=2, conversationId/sessionId=teamId. */
@@ -48,8 +80,20 @@ type V2NIMMessage = {
   serverExtension?: unknown;
   clientMsgId?: string;
   serverMsgId?: string;
-  createTime?: number;
+  createTime?: number | string;
+  /** Message type: 0 text, 1 image (PICTURE), etc. (legacy field name). */
   type?: number;
+  /** node-nim actual field: 0 text, 1 image (PICTURE), etc. */
+  messageType?: number;
+  /** For PICTURE (type=1): JSON string or object with url, md5, size, ext, w, h. */
+  attach?: string | NIMAttachImage;
+  /** node-nim actual field: { url, raw, attachmentType, ... } for image. */
+  attachment?: NIMAttachment;
+  /** Alternative field for attachment (some SDK versions). */
+  body?: string | unknown;
+  /** node-nim actual field for client/server id. */
+  messageClientId?: string;
+  messageServerId?: string;
 };
 
 /** node-nim 10.9.40+: V2NIMClient instance. */
@@ -75,6 +119,14 @@ type V2NIMClient = {
   } | null;
   messageCreator?: {
     createTextMessage(text: string): V2NIMMessage | null;
+    /** node-nim Node.js/Electron: createImageMessage(imagePath, name, sceneName, width, height). See https://doc.yunxin.163.com/messaging2/guide/DYzMjA0Njc */
+    createImageMessage?(
+      imagePath: string,
+      name: string,
+      sceneName: string,
+      width: number,
+      height: number,
+    ): V2NIMMessage | null;
   } | null;
   conversationIdUtil?: {
     p2pConversationId(accountId: string): string;
@@ -179,6 +231,8 @@ export type NimInboundMessage = {
   timestamp: number;
   conversationType: "direct" | "channel";
   teamId?: string;
+  /** Image URL from PICTURE message attach (type=1). Passed to agent for understanding. */
+  imageUrl?: string;
 };
 
 export async function createNimConnection(params: {
@@ -277,9 +331,10 @@ export async function createNimConnection(params: {
   };
   const unbindConnectionListeners = bindConnectionListeners();
 
-  const messageService = v2.getMessageService?.() ?? null;
-  const messageCreator = v2.messageCreator ?? null;
-  const conversationIdUtil = v2.conversationIdUtil ?? null;
+  const _msgSvc = v2.getMessageService?.();
+  const messageService = _msgSvc != null ? _msgSvc : null;
+  const messageCreator = v2.messageCreator != null ? v2.messageCreator : null;
+  const conversationIdUtil = v2.conversationIdUtil != null ? v2.conversationIdUtil : null;
 
   const dedupe = getDedupeState(accid);
 
@@ -288,8 +343,8 @@ export async function createNimConnection(params: {
   const isTeamMessage = (m: V2NIMMessage) => Number(m.conversationType) === CONVERSATION_TYPE_TEAM;
   /** conversationId for team is often "accid|conversationType|teamId" (e.g. 025177|2|62071378227). */
   const getTeamId = (m: V2NIMMessage) => {
-    const cid = String(m.conversationId ?? "").trim();
-    const sid = String(m.sessionId ?? "").trim();
+    const cid = String(m.conversationId != null ? m.conversationId : "").trim();
+    const sid = String(m.sessionId != null ? m.sessionId : "").trim();
     if (Number(m.conversationType) === CONVERSATION_TYPE_TEAM && cid) {
       const parts = cid.split("|");
       if (parts.length >= 3) return parts[2]!.trim();
@@ -327,7 +382,7 @@ export async function createNimConnection(params: {
     if (tryHait(m.serverExtension)) return true;
     const extRaw = m.ext;
     if (typeof extRaw === "string" && extRaw.trim() && tryHait(extRaw)) return true;
-    const t = String(m.text ?? "");
+    const t = String(m.text != null ? m.text : "");
     if (
       t.includes(`@${ourAccid}`) ||
       t.includes(`@${ourAccid}\u2005`) ||
@@ -342,23 +397,67 @@ export async function createNimConnection(params: {
       return;
     }
     const ct = m.conversationType;
-    const from = String(m.senderId ?? "").trim() || "-";
-    const text = String(m.text ?? "").slice(0, 30);
+    const from = String(m.senderId != null ? m.senderId : "").trim() || "-";
+    const text = String(m.text != null ? m.text : "").slice(0, 30);
     runtime.log?.(`[netease-yunxin] skip: ${reason} (conv=${ct} from=${from} text=${text})`);
+    if (reason === "not text or image") {
+      try {
+        const full = JSON.stringify(m, null, 2);
+        const maxLen = 2000;
+        const out = full.length > maxLen ? `${full.slice(0, maxLen)}…` : full;
+        runtime.log?.(`[netease-yunxin] message full: ${out}`);
+      } catch {
+        runtime.log?.(`[netease-yunxin] message keys: ${Object.keys(m).join(", ")}`);
+      }
+    }
+  };
+
+  /** Parse image URL from PICTURE message (attachment / attach / body). */
+  const parseImageUrlFromMessage = (m: V2NIMMessage): string | undefined => {
+    const att = m.attachment;
+    if (att && typeof att === "object") {
+      const direct = att.url;
+      if (typeof direct === "string" && direct.trim()) return direct.trim();
+      const rawStr = att.raw;
+      if (typeof rawStr === "string" && rawStr.trim()) {
+        try {
+          const obj = JSON.parse(rawStr) as NIMAttachImage;
+          const u = obj?.url;
+          if (typeof u === "string" && u.trim()) return u.trim();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    const raw = m.attach != null ? m.attach : (m as { body?: string }).body;
+    if (raw == null) return undefined;
+    let obj: NIMAttachImage | undefined;
+    if (typeof raw === "string") {
+      try {
+        obj = JSON.parse(raw) as NIMAttachImage;
+      } catch {
+        return undefined;
+      }
+    } else if (typeof raw === "object" && raw !== null) {
+      obj = raw as NIMAttachImage;
+    }
+    const url = obj?.url;
+    return typeof url === "string" && url.trim() ? url.trim() : undefined;
   };
 
   let receiveHandler: ((messages: V2NIMMessage[]) => void) | null = null;
   if (messageService?.on) {
     receiveHandler = (messages: V2NIMMessage[]) => {
-      const list = messages ?? [];
+      const list = messages != null ? messages : [];
       const now = Date.now();
       let accepted = 0;
       let skipped = 0;
       for (const m of list) {
-        const receiverId = String(m.receiverId ?? "").trim();
-        const from = String(m.senderId ?? "").trim();
-        const type = Number(m.type ?? -1);
-        const text = String(m.text ?? "").trim();
+        const receiverId = String(m.receiverId != null ? m.receiverId : "").trim();
+        const from = String(m.senderId != null ? m.senderId : "").trim();
+        const type = Number(m.messageType != null ? m.messageType : m.type != null ? m.type : -1);
+        const text = String(m.text != null ? m.text : "").trim();
+        const imageUrl = type === 1 ? parseImageUrlFromMessage(m) : undefined;
         const isText =
           type === 0 ||
           (text.length > 0 &&
@@ -369,15 +468,28 @@ export async function createNimConnection(params: {
             type !== 5 &&
             type !== 6 &&
             type !== 10);
-        if (!isText) {
-          logSkip("not text", m);
+        const isTextOrImage = isText || (type === 1 && imageUrl);
+        if (!isTextOrImage) {
+          logSkip("not text or image", m);
           skipped += 1;
           continue;
         }
-        const serverId = String(m.serverMsgId ?? "").trim();
-        const clientId = String(m.clientMsgId ?? "").trim();
+        const serverId = String(
+          m.messageServerId != null
+            ? m.messageServerId
+            : m.serverMsgId != null
+              ? m.serverMsgId
+              : "",
+        ).trim();
+        const clientId = String(
+          m.messageClientId != null
+            ? m.messageClientId
+            : m.clientMsgId != null
+              ? m.clientMsgId
+              : "",
+        ).trim();
         const messageId = serverId || clientId || `sdk-${now}`;
-        const timestamp = Number(m.createTime ?? Date.now());
+        const timestamp = Number(m.createTime != null ? m.createTime : Date.now());
         const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
         if (tsMs < connectionReadyAtMs - CLOCK_SKEW_GRACE_MS) {
           logSkip("before connection ready (startup guard)", m);
@@ -415,20 +527,23 @@ export async function createNimConnection(params: {
             skipped += 1;
             continue;
           }
-          const fromTextKey = `team:${teamId}:${from}:${text}`;
-          if (teamDedupe.processing.has(fromTextKey)) {
+          const teamFromTextKey =
+            type === 1
+              ? `team:${teamId}:${from}:image:${messageId}`
+              : `team:${teamId}:${from}:${text}`;
+          if (teamDedupe.processing.has(teamFromTextKey)) {
             skipped += 1;
             continue;
           }
-          const lastAt = teamDedupe.recentFromText.get(fromTextKey);
+          const lastAt = teamDedupe.recentFromText.get(teamFromTextKey);
           if (lastAt != null && now - lastAt < DEDUPE_WINDOW_MS) {
             skipped += 1;
             continue;
           }
-          teamDedupe.processing.add(fromTextKey);
+          teamDedupe.processing.add(teamFromTextKey);
           if (dedupeById) teamDedupe.seenIds.add(dedupeById);
-          teamDedupe.recentFromText.set(fromTextKey, now);
-          setTimeout(() => teamDedupe.processing.delete(fromTextKey), PROCESSING_RELEASE_MS);
+          teamDedupe.recentFromText.set(teamFromTextKey, now);
+          setTimeout(() => teamDedupe.processing.delete(teamFromTextKey), PROCESSING_RELEASE_MS);
           if (teamDedupe.recentFromText.size > 200) {
             const cutoff = now - DEDUPE_WINDOW_MS * 2;
             for (const [k, t] of teamDedupe.recentFromText) {
@@ -442,16 +557,18 @@ export async function createNimConnection(params: {
           }
           accepted += 1;
           statusSink?.({ lastInboundAt: Date.now() });
+          const teamBody = text || (imageUrl ? "<media:image>" : "");
           runtime.log?.(
-            `[netease-yunxin] RECV team=${teamId} from=${from} text=${text?.slice(0, 60) ?? ""}`,
+            `[netease-yunxin] RECV team=${teamId} from=${from} text=${teamBody != null ? String(teamBody).slice(0, 60) : ""}${imageUrl ? " [image]" : ""}`,
           );
           onMessage({
             from,
-            text,
+            text: teamBody,
             messageId,
             timestamp: tsMs,
             conversationType: "channel",
             teamId,
+            imageUrl,
           });
           continue;
         }
@@ -477,7 +594,7 @@ export async function createNimConnection(params: {
           skipped += 1;
           continue;
         }
-        const fromTextKey = `${from}:${text}`;
+        const fromTextKey = type === 1 ? `${from}:image:${messageId}` : `${from}:${text}`;
         if (dedupe.processing.has(fromTextKey)) {
           skipped += 1;
           continue;
@@ -504,8 +621,18 @@ export async function createNimConnection(params: {
         }
         accepted += 1;
         statusSink?.({ lastInboundAt: Date.now() });
-        runtime.log?.(`[netease-yunxin] RECV from=${from} text=${text?.slice(0, 80) ?? ""}`);
-        onMessage({ from, text, messageId, timestamp: tsMs, conversationType: "direct" });
+        const p2pBody = text || (imageUrl ? "<media:image>" : "");
+        runtime.log?.(
+          `[netease-yunxin] RECV from=${from} text=${p2pBody != null ? String(p2pBody).slice(0, 80) : ""}${imageUrl ? " [image]" : ""}`,
+        );
+        onMessage({
+          from,
+          text: p2pBody,
+          messageId,
+          timestamp: tsMs,
+          conversationType: "direct",
+          imageUrl,
+        });
       }
       if (list.length > 0 && (accepted > 0 || skipped > 0)) {
         runtime.log?.(
@@ -546,10 +673,15 @@ export async function createNimConnection(params: {
       });
       const result = await Promise.race([sendPromise, sendTimeout]);
       const outMsg = result?.message;
-      const messageId = outMsg?.serverMsgId ?? outMsg?.clientMsgId ?? `sdk-${Date.now()}`;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
       if (outMsg) {
-        const sid = String(outMsg.serverMsgId ?? "").trim();
-        const cid = String(outMsg.clientMsgId ?? "").trim();
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
         if (sid) addSentMessageId(accid, sid);
         if (cid) addSentMessageId(accid, cid);
       }
@@ -598,10 +730,15 @@ export async function createNimConnection(params: {
       });
       const result = await Promise.race([sendPromise, sendTimeout]);
       const outMsg = result?.message;
-      const messageId = outMsg?.serverMsgId ?? outMsg?.clientMsgId ?? `sdk-${Date.now()}`;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
       if (outMsg) {
-        const sid = String(outMsg.serverMsgId ?? "").trim();
-        const cid = String(outMsg.clientMsgId ?? "").trim();
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
         if (sid) addSentMessageId(accid, sid);
         if (cid) addSentMessageId(accid, cid);
       }
@@ -609,6 +746,141 @@ export async function createNimConnection(params: {
       return { ok: true, messageId };
     } catch (e) {
       runtime.error?.(`[netease-yunxin] SDK send team failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
+
+  const sendImage = async (
+    toAccid: string,
+    imagePath: string,
+    opts?: { name?: string; width?: number; height?: number },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
+    const createImage = messageCreator?.createImageMessage;
+    if (!createImage || !messageService?.sendMessage || !conversationIdUtil) {
+      return {
+        ok: false,
+        error:
+          "createImageMessage or messageService/conversationIdUtil not available; send image as text fallback",
+      };
+    }
+    const name = (opts?.name != null ? opts.name : path.basename(imagePath)) || "image.jpg";
+    const sceneName = "nim_default_im";
+    const width = opts?.width != null ? opts.width : 0;
+    const height = opts?.height != null ? opts.height : 0;
+    let msg: unknown = null;
+    try {
+      msg = createImage(imagePath, name, sceneName, width, height);
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] createImageMessage failed: ${String(e)}`);
+    }
+    if (!msg) {
+      return {
+        ok: false,
+        error:
+          "createImageMessage(imagePath, name, sceneName, width, height) failed. Send image as text fallback.",
+      };
+    }
+    try {
+      const conversationId = conversationIdUtil.p2pConversationId(toAccid);
+      runtime.log?.(`[netease-yunxin] SDK send image to=${toAccid} path=${imagePath.slice(0, 50)}`);
+      const SEND_TIMEOUT_MS = 60_000;
+      const sendPromise = messageService.sendMessage(msg, conversationId, {}, null);
+      const sendTimeout = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`send image timed out after ${SEND_TIMEOUT_MS / 1000}s`)),
+          SEND_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([sendPromise, sendTimeout]);
+      const outMsg = result?.message;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
+      if (outMsg) {
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
+        if (sid) addSentMessageId(accid, sid);
+        if (cid) addSentMessageId(accid, cid);
+      }
+      runtime.log?.(`[netease-yunxin] SDK send image ok`);
+      return { ok: true, messageId };
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] SDK send image failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
+
+  const sendTeamImage = async (
+    teamId: string,
+    imagePath: string,
+    opts?: { name?: string; width?: number; height?: number },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
+    const createImage = messageCreator?.createImageMessage;
+    if (!createImage || !messageService?.sendMessage || !conversationIdUtil) {
+      return {
+        ok: false,
+        error:
+          "createImageMessage or messageService/conversationIdUtil not available; send image as text fallback",
+      };
+    }
+    const teamConvId =
+      typeof conversationIdUtil.teamConversationId === "function"
+        ? conversationIdUtil.teamConversationId(teamId)
+        : undefined;
+    if (!teamConvId) {
+      return {
+        ok: false,
+        error: "teamConversationId not available for team image send",
+      };
+    }
+    const name = (opts?.name != null ? opts.name : path.basename(imagePath)) || "image.jpg";
+    const sceneName = "nim_default_im";
+    const width = opts?.width != null ? opts.width : 0;
+    const height = opts?.height != null ? opts.height : 0;
+    let msg: unknown = null;
+    try {
+      msg = createImage(imagePath, name, sceneName, width, height);
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] createImageMessage(team) failed: ${String(e)}`);
+    }
+    if (!msg) {
+      return {
+        ok: false,
+        error:
+          "createImageMessage(imagePath, name, sceneName, width, height) failed for team. Send image as text fallback.",
+      };
+    }
+    try {
+      runtime.log?.(`[netease-yunxin] SDK send team image team=${teamId}`);
+      const SEND_TIMEOUT_MS = 60_000;
+      const sendPromise = messageService.sendMessage(msg, teamConvId, {}, null);
+      const sendTimeout = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`send team image timed out after ${SEND_TIMEOUT_MS / 1000}s`)),
+          SEND_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([sendPromise, sendTimeout]);
+      const outMsg = result?.message;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
+      if (outMsg) {
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
+        if (sid) addSentMessageId(accid, sid);
+        if (cid) addSentMessageId(accid, cid);
+      }
+      runtime.log?.(`[netease-yunxin] SDK send team image ok`);
+      return { ok: true, messageId };
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] SDK send team image failed: ${String(e)}`);
       return { ok: false, error: String(e) };
     }
   };
@@ -630,7 +902,13 @@ export async function createNimConnection(params: {
     }
   };
 
-  const conn: NimConnection = { sendText, sendTeamMessage, destroy };
+  const conn: NimConnection = {
+    sendText,
+    sendTeamMessage,
+    sendImage,
+    sendTeamImage,
+    destroy,
+  };
   registerNimConnection(accountId, conn);
   runtime.log?.("[netease-yunxin] SDK connected");
   return conn;

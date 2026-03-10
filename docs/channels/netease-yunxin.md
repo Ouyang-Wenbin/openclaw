@@ -31,14 +31,15 @@ Configure in `openclaw.json` under `channels.netease-yunxin`, or use environment
 
 ### Config keys
 
-| Key         | Description                                                          |
-| ----------- | -------------------------------------------------------------------- |
-| `appKey`    | NetEase app key (from NIM console).                                  |
-| `accountId` | NIM account id (accid), used for SDK login.                          |
-| `token`     | Login token for SDK (required). See 获取静态 Token in NIM docs.      |
-| `enabled`   | Enable/disable the channel (default: true).                          |
-| `allowFrom` | Allowlist of accids for DMs (optional).                              |
-| `dmPolicy`  | `pairing` \| `allowlist` \| `open` \| `disabled` (default: pairing). |
+| Key          | Description                                                               |
+| ------------ | ------------------------------------------------------------------------- |
+| `appKey`     | NetEase app key (from NIM console).                                       |
+| `accountId`  | NIM account id (accid), used for SDK login.                               |
+| `token`      | Login token for SDK (required). See 获取静态 Token in NIM docs.           |
+| `enabled`    | Enable/disable the channel (default: true).                               |
+| `allowFrom`  | Allowlist of accids for DMs (optional).                                   |
+| `dmPolicy`   | `pairing` \| `allowlist` \| `open` \| `disabled` (default: pairing).      |
+| `mediaMaxMb` | Max size (MB) for downloading inbound images for the model (default: 10). |
 
 ### Environment variables (default account only)
 
@@ -67,6 +68,11 @@ Configure in `openclaw.json` under `channels.netease-yunxin`, or use environment
 - **Send**: `openclaw message send --channel netease-yunxin --to <accid> --message "Hello"`. The `--to` value is the recipient's NIM accid.
 - **Receive**: Plugin uses **node-nim** to log in and receive messages over a long connection. At startup you should see `[netease-yunxin] SDK connected; send and receive via long connection`.
 - The plugin depends on `node-nim` (native addon). If you use pnpm and see "Ignored build scripts" for node-nim, run `pnpm approve-builds` in the repo or install the plugin with npm in the extension directory so the addon builds.
+
+## Images
+
+- **Inbound (receive)**: PICTURE messages (type=1) are accepted. The image URL from the message `attach` is downloaded (up to `mediaMaxMb`), saved locally, and passed to the agent so the model can understand the image. Reply can be text or media.
+- **Outbound (send)**: When the agent or CLI sends media (e.g. screenshot, generated image), the plugin tries to send a real PICTURE message via node-nim `createImageMessage` (local file path). If the SDK does not support it, the message is sent as text with an "Attachment: &lt;url&gt;" link.
 
 ## Access control (DMs)
 
