@@ -116,6 +116,11 @@ const MemorySchema = z
     backend: z.union([z.literal("builtin"), z.literal("qmd")]).optional(),
     citations: z.union([z.literal("auto"), z.literal("on"), z.literal("off")]).optional(),
     qmd: MemoryQmdSchema.optional(),
+    // Deprecated: memory search is controlled by agents.defaults.memorySearch.*; these are ignored.
+    enabled: z.boolean().optional(),
+    embedding: z.object({}).passthrough().optional(),
+    index: z.object({}).passthrough().optional(),
+    search: z.object({}).passthrough().optional(),
   })
   .strict()
   .optional();
