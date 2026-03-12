@@ -45,6 +45,10 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
   imageName?: string;
   imageWidth?: number;
   imageHeight?: number;
+  /** Local path to file for FILE message (upload then send via createFileMessage). */
+  filePath?: string;
+  /** Optional file name for createFileMessage (defaults to basename of filePath). */
+  fileName?: string;
 }): Promise<NeteaseYunxinSendResult> {
   const accountId = resolveAccountIdForSend(params.cfg, params.accountId);
   const { accid, teamId } = parseTarget(params.to);
@@ -102,6 +106,13 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
         return await conn.sendTeamImage(teamId, params.imagePath, imageOpts);
       }
       return await conn.sendImage(accid!, params.imagePath, imageOpts);
+    }
+    if (params.filePath) {
+      const fileOpts = params.fileName != null ? { name: params.fileName } : undefined;
+      if (teamId) {
+        return await conn.sendTeamFile(teamId, params.filePath, fileOpts);
+      }
+      return await conn.sendFile(accid!, params.filePath, fileOpts);
     }
     if (teamId) {
       return await conn.sendTeamMessage(teamId, params.text ?? "");

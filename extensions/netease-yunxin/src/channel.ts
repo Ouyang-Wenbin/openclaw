@@ -208,6 +208,8 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
                 conversationType: msg.conversationType,
                 teamId: msg.teamId,
                 imageUrl: msg.imageUrl,
+                fileUrl: msg.fileUrl,
+                fileName: msg.fileName,
               },
               account,
               config: ctx.cfg,

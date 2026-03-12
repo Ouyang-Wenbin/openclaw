@@ -62,6 +62,10 @@ export type NeteaseYunxinInboundMessage = {
   teamId?: string;
   /** Image URL from PICTURE message (type=1); fetched and passed to model. */
   imageUrl?: string;
+  /** File URL from FILE message (type=6). */
+  fileUrl?: string;
+  /** File name from FILE message (type=6). */
+  fileName?: string;
 };
 
 export async function handleNeteaseYunxinInbound(params: {
@@ -73,19 +77,24 @@ export async function handleNeteaseYunxinInbound(params: {
 }): Promise<void> {
   const { message, account, config, runtime, statusSink } = params;
   const core = getNeteaseYunxinRuntime();
-  const rawBody = message.text?.trim() || (message.imageUrl ? "<media:image>" : "");
+  const rawBody =
+    message.text?.trim() ||
+    (message.imageUrl ? "<media:image>" : "") ||
+    (message.fileUrl ? `[文件] ${message.fileName ?? "attachment"}` : "");
   if (!rawBody) {
     runtime.log?.(`[netease-yunxin] inbound drop empty from=${message.senderId}`);
     return;
   }
   runtime.log?.(
-    `[netease-yunxin] inbound from=${message.senderId} body=${rawBody.slice(0, 60)}${rawBody.length > 60 ? "…" : ""}${message.imageUrl ? " [image]" : ""}`,
+    `[netease-yunxin] inbound from=${message.senderId} body=${rawBody.slice(0, 60)}${rawBody.length > 60 ? "…" : ""}${message.imageUrl ? " [image]" : ""}${message.fileUrl ? " [file]" : ""}`,
   );
 
   statusSink?.({ lastInboundAt: message.timestamp });
 
   let mediaPath: string | undefined;
   let mediaType: string | undefined;
+  /** When file message is not fetched (e.g. too large), pass URL to agent. */
+  let fileUrlForContext: string | undefined;
   if (message.imageUrl) {
     try {
       const maxBytes = (account.config.mediaMaxMb ?? 10) * 1024 * 1024;
@@ -104,6 +113,30 @@ export async function handleNeteaseYunxinInbound(params: {
       runtime.log?.(`[netease-yunxin] inbound image saved path=${mediaPath}`);
     } catch (err) {
       runtime.error?.(`[netease-yunxin] inbound image fetch failed: ${String(err)}`);
+    }
+  } else if (message.fileUrl) {
+    fileUrlForContext = message.fileUrl;
+    try {
+      const maxBytes = (account.config.mediaMaxMb ?? 10) * 1024 * 1024;
+      const fetched = await core.channel.media.fetchRemoteMedia({
+        url: message.fileUrl,
+        maxBytes,
+      });
+      const contentType =
+        fetched.contentType && !fetched.contentType.startsWith("text/html")
+          ? fetched.contentType
+          : "application/octet-stream";
+      const saved = await core.channel.media.saveMediaBuffer(
+        fetched.buffer,
+        contentType,
+        "inbound",
+        maxBytes,
+      );
+      mediaPath = saved.path;
+      mediaType = saved.contentType;
+      runtime.log?.(`[netease-yunxin] inbound file saved path=${mediaPath}`);
+    } catch (err) {
+      runtime.log?.(`[netease-yunxin] inbound file not downloaded (use URL): ${String(err)}`);
     }
   }
 
@@ -233,6 +266,7 @@ export async function handleNeteaseYunxinInbound(params: {
     OriginatingTo: replyTo,
     CommandAuthorized: commandGate.commandAuthorized,
     ...(mediaPath ? { MediaPath: mediaPath, MediaType: mediaType, MediaUrl: mediaPath } : {}),
+    ...(fileUrlForContext && !mediaPath ? { MediaUrl: fileUrlForContext } : {}),
   });
 
   await core.channel.session.recordInboundSession({

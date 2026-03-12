@@ -29,6 +29,17 @@ export type NimConnection = {
     imagePath: string,
     opts?: { name?: string; width?: number; height?: number },
   ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  /** Send FILE message from local file path (upload then send via createFileMessage). */
+  sendFile(
+    toAccid: string,
+    filePath: string,
+    opts?: { name?: string },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  sendTeamFile(
+    teamId: string,
+    filePath: string,
+    opts?: { name?: string },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
   destroy(): Promise<void>;
 };
 
@@ -55,11 +66,23 @@ type NIMAttachImage = {
   [k: string]: unknown;
 };
 
-/** node-nim attachment object (messageType=1): url, raw JSON string, etc. */
+/** node-nim attachment object (messageType=1 image, messageType=6 file): url, raw JSON string, name, etc. */
 type NIMAttachment = {
   url?: string;
   raw?: string;
   attachmentType?: number;
+  name?: string;
+  ext?: string;
+  size?: number;
+  [k: string]: unknown;
+};
+
+/** File attachment payload (attachmentType=6). */
+type NIMAttachFile = {
+  url?: string;
+  name?: string;
+  ext?: string;
+  size?: number;
   [k: string]: unknown;
 };
 
@@ -127,6 +150,8 @@ type V2NIMClient = {
       width: number,
       height: number,
     ): V2NIMMessage | null;
+    /** node-nim Node.js/Electron: createFileMessage(filePath, name, sceneName). Upload then send. */
+    createFileMessage?(filePath: string, name: string, sceneName: string): V2NIMMessage | null;
   } | null;
   conversationIdUtil?: {
     p2pConversationId(accountId: string): string;
@@ -233,6 +258,10 @@ export type NimInboundMessage = {
   teamId?: string;
   /** Image URL from PICTURE message attach (type=1). Passed to agent for understanding. */
   imageUrl?: string;
+  /** File URL from FILE message (type=6). */
+  fileUrl?: string;
+  /** File name from FILE message (type=6). */
+  fileName?: string;
 };
 
 export async function createNimConnection(params: {
@@ -412,6 +441,31 @@ export async function createNimConnection(params: {
     }
   };
 
+  /** Message type: 6 = file (FILE). */
+  const MESSAGE_TYPE_FILE = 6;
+
+  /** Parse file URL and name from FILE message (messageType=6, attachment with url/name or raw JSON). */
+  const parseFileFromMessage = (m: V2NIMMessage): { url: string; name: string } | undefined => {
+    const att = m.attachment;
+    if (!att || typeof att !== "object") return undefined;
+    let url: string | undefined;
+    let name: string | undefined;
+    if (typeof att.url === "string" && att.url.trim()) url = att.url.trim();
+    if (typeof att.name === "string" && att.name.trim()) name = att.name.trim();
+    const rawStr = att.raw;
+    if (typeof rawStr === "string" && rawStr.trim()) {
+      try {
+        const obj = JSON.parse(rawStr) as NIMAttachFile;
+        if (!url && typeof obj?.url === "string" && obj.url.trim()) url = obj.url.trim();
+        if (!name && typeof obj?.name === "string" && obj.name.trim()) name = obj.name.trim();
+      } catch {
+        // ignore
+      }
+    }
+    if (!url) return undefined;
+    return { url, name: name || "attachment" };
+  };
+
   /** Parse image URL from PICTURE message (attachment / attach / body). */
   const parseImageUrlFromMessage = (m: V2NIMMessage): string | undefined => {
     const att = m.attachment;
@@ -458,6 +512,7 @@ export async function createNimConnection(params: {
         const type = Number(m.messageType != null ? m.messageType : m.type != null ? m.type : -1);
         const text = String(m.text != null ? m.text : "").trim();
         const imageUrl = type === 1 ? parseImageUrlFromMessage(m) : undefined;
+        const fileInfo = type === MESSAGE_TYPE_FILE ? parseFileFromMessage(m) : undefined;
         const isText =
           type === 0 ||
           (text.length > 0 &&
@@ -466,11 +521,12 @@ export async function createNimConnection(params: {
             type !== 3 &&
             type !== 4 &&
             type !== 5 &&
-            type !== 6 &&
+            type !== MESSAGE_TYPE_FILE &&
             type !== 10);
-        const isTextOrImage = isText || (type === 1 && imageUrl);
-        if (!isTextOrImage) {
-          logSkip("not text or image", m);
+        const isTextOrImageOrFile =
+          isText || (type === 1 && imageUrl) || (type === MESSAGE_TYPE_FILE && fileInfo?.url);
+        if (!isTextOrImageOrFile) {
+          logSkip("not text or image or file", m);
           skipped += 1;
           continue;
         }
@@ -530,7 +586,9 @@ export async function createNimConnection(params: {
           const teamFromTextKey =
             type === 1
               ? `team:${teamId}:${from}:image:${messageId}`
-              : `team:${teamId}:${from}:${text}`;
+              : type === MESSAGE_TYPE_FILE && fileInfo?.url
+                ? `team:${teamId}:${from}:file:${messageId}`
+                : `team:${teamId}:${from}:${text}`;
           if (teamDedupe.processing.has(teamFromTextKey)) {
             skipped += 1;
             continue;
@@ -557,9 +615,12 @@ export async function createNimConnection(params: {
           }
           accepted += 1;
           statusSink?.({ lastInboundAt: Date.now() });
-          const teamBody = text || (imageUrl ? "<media:image>" : "");
+          const teamBody =
+            text ||
+            (imageUrl ? "<media:image>" : "") ||
+            (fileInfo ? `[文件] ${fileInfo.name}` : "");
           runtime.log?.(
-            `[netease-yunxin] RECV team=${teamId} from=${from} text=${teamBody != null ? String(teamBody).slice(0, 60) : ""}${imageUrl ? " [image]" : ""}`,
+            `[netease-yunxin] RECV team=${teamId} from=${from} text=${teamBody != null ? String(teamBody).slice(0, 60) : ""}${imageUrl ? " [image]" : ""}${fileInfo ? " [file]" : ""}`,
           );
           onMessage({
             from,
@@ -569,6 +630,8 @@ export async function createNimConnection(params: {
             conversationType: "channel",
             teamId,
             imageUrl,
+            fileUrl: fileInfo?.url,
+            fileName: fileInfo?.name,
           });
           continue;
         }
@@ -594,7 +657,12 @@ export async function createNimConnection(params: {
           skipped += 1;
           continue;
         }
-        const fromTextKey = type === 1 ? `${from}:image:${messageId}` : `${from}:${text}`;
+        const fromTextKey =
+          type === 1
+            ? `${from}:image:${messageId}`
+            : type === MESSAGE_TYPE_FILE && fileInfo?.url
+              ? `${from}:file:${messageId}`
+              : `${from}:${text}`;
         if (dedupe.processing.has(fromTextKey)) {
           skipped += 1;
           continue;
@@ -621,9 +689,10 @@ export async function createNimConnection(params: {
         }
         accepted += 1;
         statusSink?.({ lastInboundAt: Date.now() });
-        const p2pBody = text || (imageUrl ? "<media:image>" : "");
+        const p2pBody =
+          text || (imageUrl ? "<media:image>" : "") || (fileInfo ? `[文件] ${fileInfo.name}` : "");
         runtime.log?.(
-          `[netease-yunxin] RECV from=${from} text=${p2pBody != null ? String(p2pBody).slice(0, 80) : ""}${imageUrl ? " [image]" : ""}`,
+          `[netease-yunxin] RECV from=${from} text=${p2pBody != null ? String(p2pBody).slice(0, 80) : ""}${imageUrl ? " [image]" : ""}${fileInfo ? " [file]" : ""}`,
         );
         onMessage({
           from,
@@ -632,6 +701,8 @@ export async function createNimConnection(params: {
           timestamp: tsMs,
           conversationType: "direct",
           imageUrl,
+          fileUrl: fileInfo?.url,
+          fileName: fileInfo?.name,
         });
       }
       if (list.length > 0 && (accepted > 0 || skipped > 0)) {
@@ -885,6 +956,134 @@ export async function createNimConnection(params: {
     }
   };
 
+  const FILE_SCENE_NAME = "nim_default_im";
+  const sendFile = async (
+    toAccid: string,
+    filePath: string,
+    opts?: { name?: string },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
+    const createFile = messageCreator?.createFileMessage;
+    if (!createFile || !messageService?.sendMessage || !conversationIdUtil) {
+      return {
+        ok: false,
+        error:
+          "createFileMessage or messageService/conversationIdUtil not available; send file as text fallback",
+      };
+    }
+    const name = (opts?.name != null ? opts.name : path.basename(filePath)) || "file";
+    let msg: unknown = null;
+    try {
+      msg = createFile(filePath, name, FILE_SCENE_NAME);
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] createFileMessage failed: ${String(e)}`);
+    }
+    if (!msg) {
+      return {
+        ok: false,
+        error: "createFileMessage(filePath, name, sceneName) failed. Send file as text fallback.",
+      };
+    }
+    try {
+      const conversationId = conversationIdUtil.p2pConversationId(toAccid);
+      runtime.log?.(`[netease-yunxin] SDK send file to=${toAccid} path=${filePath.slice(0, 50)}`);
+      const SEND_TIMEOUT_MS = 120_000;
+      const sendPromise = messageService.sendMessage(msg, conversationId, {}, null);
+      const sendTimeout = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`send file timed out after ${SEND_TIMEOUT_MS / 1000}s`)),
+          SEND_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([sendPromise, sendTimeout]);
+      const outMsg = result?.message;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
+      if (outMsg) {
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
+        if (sid) addSentMessageId(accid, sid);
+        if (cid) addSentMessageId(accid, cid);
+      }
+      runtime.log?.(`[netease-yunxin] SDK send file ok`);
+      return { ok: true, messageId };
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] SDK send file failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
+
+  const sendTeamFile = async (
+    teamId: string,
+    filePath: string,
+    opts?: { name?: string },
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
+    const createFile = messageCreator?.createFileMessage;
+    if (!createFile || !messageService?.sendMessage || !conversationIdUtil) {
+      return {
+        ok: false,
+        error:
+          "createFileMessage or messageService/conversationIdUtil not available; send file as text fallback",
+      };
+    }
+    const teamConvId =
+      typeof conversationIdUtil.teamConversationId === "function"
+        ? conversationIdUtil.teamConversationId(teamId)
+        : undefined;
+    if (!teamConvId) {
+      return {
+        ok: false,
+        error: "teamConversationId not available for team file send",
+      };
+    }
+    const name = (opts?.name != null ? opts.name : path.basename(filePath)) || "file";
+    let msg: unknown = null;
+    try {
+      msg = createFile(filePath, name, FILE_SCENE_NAME);
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] createFileMessage(team) failed: ${String(e)}`);
+    }
+    if (!msg) {
+      return {
+        ok: false,
+        error: "createFileMessage(filePath, name, sceneName) failed for team.",
+      };
+    }
+    try {
+      runtime.log?.(`[netease-yunxin] SDK send team file team=${teamId}`);
+      const SEND_TIMEOUT_MS = 120_000;
+      const sendPromise = messageService.sendMessage(msg, teamConvId, {}, null);
+      const sendTimeout = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`send team file timed out after ${SEND_TIMEOUT_MS / 1000}s`)),
+          SEND_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([sendPromise, sendTimeout]);
+      const outMsg = result?.message;
+      const messageId =
+        outMsg?.serverMsgId != null
+          ? outMsg.serverMsgId
+          : outMsg?.clientMsgId != null
+            ? outMsg.clientMsgId
+            : `sdk-${Date.now()}`;
+      if (outMsg) {
+        const sid = String(outMsg.serverMsgId != null ? outMsg.serverMsgId : "").trim();
+        const cid = String(outMsg.clientMsgId != null ? outMsg.clientMsgId : "").trim();
+        if (sid) addSentMessageId(accid, sid);
+        if (cid) addSentMessageId(accid, cid);
+      }
+      runtime.log?.(`[netease-yunxin] SDK send team file ok`);
+      return { ok: true, messageId };
+    } catch (e) {
+      runtime.error?.(`[netease-yunxin] SDK send team file failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
+
   const destroy = async (): Promise<void> => {
     unbindConnectionListeners();
     unregisterNimConnection(accountId);
@@ -907,6 +1106,8 @@ export async function createNimConnection(params: {
     sendTeamMessage,
     sendImage,
     sendTeamImage,
+    sendFile,
+    sendTeamFile,
     destroy,
   };
   registerNimConnection(accountId, conn);

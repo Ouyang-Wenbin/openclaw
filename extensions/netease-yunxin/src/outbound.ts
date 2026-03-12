@@ -5,7 +5,7 @@ import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk";
 import { getNeteaseYunxinRuntime } from "./runtime.js";
 import { sendMessageNeteaseYunxinWithConfig } from "./send.js";
 
-const OUTBOUND_IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10MB
+const OUTBOUND_MEDIA_MAX_BYTES = 10 * 1024 * 1024; // 10MB (image and file)
 
 function extFromContentType(contentType: string | undefined): string {
   if (!contentType) return "jpg";
@@ -14,6 +14,33 @@ function extFromContentType(contentType: string | undefined): string {
   if (m.includes("gif")) return "gif";
   if (m.includes("webp")) return "webp";
   return "jpg";
+}
+
+function isImageContentType(contentType: string | undefined): boolean {
+  if (!contentType) return false;
+  return contentType.toLowerCase().startsWith("image/");
+}
+
+/** Extension for non-image file from contentType (e.g. application/pdf -> pdf). */
+function fileExtFromContentType(contentType: string | undefined): string {
+  if (!contentType) return "bin";
+  const m = contentType.toLowerCase().split(";")[0]!.trim();
+  if (m === "application/pdf") return "pdf";
+  if (m === "application/msword") return "doc";
+  if (m === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    return "docx";
+  if (m === "application/vnd.ms-excel") return "xls";
+  if (m === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") return "xlsx";
+  if (m === "application/vnd.ms-powerpoint") return "ppt";
+  if (m === "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    return "pptx";
+  if (m === "text/plain") return "txt";
+  const slash = m.indexOf("/");
+  if (slash > 0) {
+    const sub = m.slice(slash + 1);
+    if (sub && !sub.includes("x-")) return sub;
+  }
+  return "bin";
 }
 
 export const neteaseYunxinOutbound: ChannelOutboundAdapter = {
@@ -48,12 +75,12 @@ export const neteaseYunxinOutbound: ChannelOutboundAdapter = {
       return { channel: "netease-yunxin", messageId: result.messageId ?? "" };
     }
     const runtime = getNeteaseYunxinRuntime();
-    let imagePath: string | undefined;
+    let tempPath: string | undefined;
     let media: { buffer: Buffer; contentType?: string };
     try {
       try {
         media = await runtime.media.loadWebMedia(mediaUrl, {
-          maxBytes: OUTBOUND_IMAGE_MAX_BYTES,
+          maxBytes: OUTBOUND_MEDIA_MAX_BYTES,
           localRoots: mediaLocalRoots?.length ? [...mediaLocalRoots] : undefined,
         });
       } catch (loadErr) {
@@ -71,44 +98,68 @@ export const neteaseYunxinOutbound: ChannelOutboundAdapter = {
         if (isPathNotAllowed && path.isAbsolute(localPath) && (underTmp || underOsTmp)) {
           if (!fs.existsSync(localPath)) throw loadErr;
           const buf = fs.readFileSync(localPath);
-          if (buf.length > OUTBOUND_IMAGE_MAX_BYTES) throw loadErr;
+          if (buf.length > OUTBOUND_MEDIA_MAX_BYTES) throw loadErr;
           const mime = runtime.media.detectMime?.({ buffer: buf, filePath: localPath });
           media = {
             buffer: buf,
-            contentType: (typeof mime === "string" ? mime : undefined) ?? "image/jpeg",
+            contentType:
+              (typeof mime === "string" ? mime : undefined) ?? "application/octet-stream",
           };
         } else {
           throw loadErr;
         }
       }
-      const ext = extFromContentType(media.contentType);
-      imagePath = path.join(
-        os.tmpdir(),
-        `openclaw-yunxin-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`,
-      );
-      fs.writeFileSync(imagePath, media.buffer);
-      const meta =
-        typeof runtime.media.getImageMetadata === "function"
-          ? await runtime.media.getImageMetadata(media.buffer)
-          : null;
-      const result = await sendMessageNeteaseYunxinWithConfig({
-        cfg,
-        to,
-        text: text ?? "",
-        accountId,
-        imagePath,
-        imageName: path.basename(imagePath),
-        imageWidth: meta?.width,
-        imageHeight: meta?.height,
-      });
-      if (result.ok) {
-        return { channel: "netease-yunxin", messageId: result.messageId ?? "" };
+      const isImage = isImageContentType(media.contentType);
+      if (isImage) {
+        const ext = extFromContentType(media.contentType);
+        tempPath = path.join(
+          os.tmpdir(),
+          `openclaw-yunxin-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`,
+        );
+        fs.writeFileSync(tempPath, media.buffer);
+        const meta =
+          typeof runtime.media.getImageMetadata === "function"
+            ? await runtime.media.getImageMetadata(media.buffer)
+            : null;
+        const result = await sendMessageNeteaseYunxinWithConfig({
+          cfg,
+          to,
+          text: text ?? "",
+          accountId,
+          imagePath: tempPath,
+          imageName: path.basename(tempPath),
+          imageWidth: meta?.width,
+          imageHeight: meta?.height,
+        });
+        if (result.ok) {
+          return { channel: "netease-yunxin", messageId: result.messageId ?? "" };
+        }
+        // Fallback: send as text with link when createImageMessage not available
+      } else {
+        const ext = fileExtFromContentType(media.contentType);
+        tempPath = path.join(
+          os.tmpdir(),
+          `openclaw-yunxin-file-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`,
+        );
+        fs.writeFileSync(tempPath, media.buffer);
+        const fileName = path.basename(tempPath);
+        const result = await sendMessageNeteaseYunxinWithConfig({
+          cfg,
+          to,
+          text: text ?? "",
+          accountId,
+          filePath: tempPath,
+          fileName,
+        });
+        if (result.ok) {
+          return { channel: "netease-yunxin", messageId: result.messageId ?? "" };
+        }
+        // Fallback: send as text with link when createFileMessage not available
       }
-      // Fallback: send as text with link when createImageMessage not available
     } finally {
-      if (imagePath && fs.existsSync(imagePath)) {
+      if (tempPath && fs.existsSync(tempPath)) {
         try {
-          fs.unlinkSync(imagePath);
+          fs.unlinkSync(tempPath);
         } catch {
           // ignore
         }
@@ -117,12 +168,12 @@ export const neteaseYunxinOutbound: ChannelOutboundAdapter = {
     const isLocalPath =
       mediaUrl.startsWith("file://") ||
       (mediaUrl.startsWith("/") && !mediaUrl.startsWith("https://"));
-    const attachmentLabel = isLocalPath ? "📎 [图片]" : `Attachment: ${mediaUrl}`;
+    const attachmentLabel = isLocalPath ? "📎 [附件]" : `Attachment: ${mediaUrl}`;
     const messageWithMedia = [text ?? "", attachmentLabel].filter(Boolean).join("\n\n").trim();
     const result = await sendMessageNeteaseYunxinWithConfig({
       cfg,
       to,
-      text: messageWithMedia || "📎 [图片]",
+      text: messageWithMedia || "📎 [附件]",
       accountId,
     });
     if (!result.ok) {
