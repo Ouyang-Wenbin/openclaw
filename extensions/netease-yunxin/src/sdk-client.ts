@@ -244,6 +244,122 @@ function loadV2(runtime?: { error?: (msg: string) => void }): V2NIMClient | null
   }
 }
 
+function formatVerifyError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err != null && typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    const part =
+      typeof o.message === "string"
+        ? o.message
+        : typeof o.msg === "string"
+          ? o.msg
+          : typeof o.error === "string"
+            ? o.error
+            : typeof o.desc === "string"
+              ? o.desc
+              : null;
+    if (part) return o.code != null ? `[${o.code}] ${part}` : part;
+    return JSON.stringify(err);
+  }
+  return String(err);
+}
+
+/** Internal: init + login + uninit only. Used by verify-credentials.mjs child script. */
+export async function verifyNimCredentialsInternal(params: {
+  appKey: string;
+  accid: string;
+  token: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { appKey, accid, token } = params;
+  const v2 = loadV2();
+  if (!v2) {
+    return { ok: false, error: "node-nim 未加载，请先安装并构建扩展" };
+  }
+  const initOption: V2NIMInitOption = { appkey: appKey, appDataPath: "" };
+  const initResult = v2.init(initOption);
+  if (initResult != null && (typeof initResult === "object" ? initResult?.code : initResult)) {
+    try {
+      v2.uninit();
+    } catch {
+      // ignore
+    }
+    return {
+      ok: false,
+      error: `SDK 初始化失败: ${JSON.stringify(initResult)}`,
+    };
+  }
+  const loginService = v2.getLoginService();
+  const LOGIN_TIMEOUT_MS = 15_000;
+  const loginPromise = loginService.login(accid, token, {});
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("登录超时，请检查网络或稍后重试")), LOGIN_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([loginPromise, timeoutPromise]);
+  } catch (err) {
+    const msg = formatVerifyError(err);
+    try {
+      v2.uninit();
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: msg };
+  }
+  try {
+    v2.uninit();
+  } catch {
+    // ignore
+  }
+  return { ok: true };
+}
+
+/**
+ * Verify credentials by running init+login+uninit in a child process with stdio: 'ignore',
+ * so node-nim/Doubango logs (Winsock, SSL, DOUBANGO INFO) never appear in the parent CLI.
+ */
+export async function verifyNimCredentials(params: {
+  appKey: string;
+  accid: string;
+  token: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { spawn } = await import("node:child_process");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const { fileURLToPath } = await import("node:url");
+  const thisDir = path.dirname(fileURLToPath(import.meta.url));
+  const scriptPath = path.join(thisDir, "..", "scripts", "verify-credentials.mjs");
+  const tmp = path.join(os.tmpdir(), `netease-yunxin-verify-${Date.now()}-${process.pid}.json`);
+  const child = spawn(process.execPath, [scriptPath], {
+    env: {
+      ...process.env,
+      APPKEY: params.appKey,
+      ACCID: params.accid,
+      TOKEN: params.token,
+      OUT: tmp,
+    },
+    stdio: ["inherit", "ignore", "ignore"],
+  });
+  const code = await new Promise<number | null>((resolve) => {
+    child.on("close", resolve);
+  });
+  let content: string;
+  try {
+    content = fs.readFileSync(tmp, "utf8");
+  } catch {
+    return {
+      ok: false,
+      error: code !== 0 ? `校验进程退出 ${code}` : "无法读取校验结果",
+    };
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+  }
+  return JSON.parse(content) as { ok: boolean; error?: string };
+}
+
 /**
  * Create connection: V2 init + static token login per doc.
  * Caller must call destroy() on abort or channel stop.

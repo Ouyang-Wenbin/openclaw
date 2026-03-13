@@ -16,6 +16,7 @@ import {
 } from "./accounts.js";
 import { NeteaseYunxinConfigSchema } from "./config-schema.js";
 import { handleNeteaseYunxinInbound } from "./inbound.js";
+import { neteaseYunxinOnboardingAdapter } from "./onboarding.js";
 import { neteaseYunxinOutbound } from "./outbound.js";
 import { createNimConnection, getNimConnection } from "./sdk-client.js";
 import type { ResolvedNeteaseYunxinAccount } from "./types.js";
@@ -172,6 +173,7 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
       lastError: runtime?.lastError ?? null,
     }),
   },
+  onboarding: neteaseYunxinOnboardingAdapter,
   gateway: {
     startAccount: async (ctx) => {
       ctx.setStatus({ accountId: ctx.accountId });
