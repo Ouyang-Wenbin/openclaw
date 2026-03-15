@@ -31,15 +31,17 @@ Configure in `openclaw.json` under `channels.netease-yunxin`, or use environment
 
 ### Config keys
 
-| Key          | Description                                                               |
-| ------------ | ------------------------------------------------------------------------- |
-| `appKey`     | NetEase app key (from NIM console).                                       |
-| `accountId`  | NIM account id (accid), used for SDK login.                               |
-| `token`      | Login token for SDK (required). See 获取静态 Token in NIM docs.           |
-| `enabled`    | Enable/disable the channel (default: true).                               |
-| `allowFrom`  | Allowlist of accids for DMs (optional).                                   |
-| `dmPolicy`   | `pairing` \| `allowlist` \| `open` \| `disabled` (default: pairing).      |
-| `mediaMaxMb` | Max size (MB) for downloading inbound images for the model (default: 10). |
+| Key           | Description                                                                    |
+| ------------- | ------------------------------------------------------------------------------ |
+| `appKey`      | NetEase app key (from NIM console).                                            |
+| `accountId`   | NIM account id (accid), used for SDK login.                                    |
+| `token`       | Login token for SDK (required). See 获取静态 Token in NIM docs.                |
+| `enabled`     | Enable/disable the channel (default: true).                                    |
+| `allowFrom`   | Allowlist of accids for DMs (optional).                                        |
+| `dmPolicy`    | `pairing` \| `allowlist` \| `open` \| `disabled` (default: pairing).           |
+| `mediaMaxMb`  | Max size (MB) for downloading inbound images for the model (default: 10).      |
+| `linkOption`  | Optional SDK init link options (e.g. custom link server; see Troubleshooting). |
+| `basicOption` | Optional SDK init basic options (shape depends on node-nim version).           |
 
 ### Environment variables (default account only)
 
@@ -79,3 +81,16 @@ Configure in `openclaw.json` under `channels.netease-yunxin`, or use environment
 - Default: `dmPolicy = "pairing"`. Unknown senders get a pairing code.
 - Approve via: `openclaw pairing approve netease-yunxin <CODE>`.
 - Public DMs: `dmPolicy="open"` and `allowFrom=["*"]`.
+
+## Troubleshooting
+
+### VPN or system proxy (wanproxy / SOCKS / ELIFECYCLE)
+
+If you see errors such as `Connection to host wanproxy.127.net left intact`, `[DOUBANGO INFO]: UnRegister network proxy node plugin: SOCKS...`, or `ELIFECYCLE Command failed with exit code 1` when a VPN or system proxy is enabled, the **node-nim** native SDK (or its native stack) can conflict with the proxy. The SDK may try to use or unregister a SOCKS proxy and then fail.
+
+**Suggestions:**
+
+1. **Bypass VPN for the gateway**: Run the OpenClaw gateway without routing its traffic through the VPN (e.g. split tunneling so the gateway process uses the direct network).
+2. **Custom link server**: If your NIM app uses an overseas or custom link server, set `linkOption` (and optionally `basicOption`) in config so the SDK uses the intended server. The exact keys depend on the node-nim version; see [NIM ServerAddresses](https://doc.yunxin.163.com/docs/interface/IM_Android_EN/IM_Android/com/netease/nimlib/sdk/ServerAddresses.html) and node-nim API for link/server options.
+
+3. **IPv6**: NetEase Yunxin supports IPv6 on the server side. If your environment has broken or slow IPv6 routing (common with some VPNs), connection issues may improve by using a link server that resolves to IPv4 or by configuring the system to prefer IPv4 for the SDK; `linkOption` can be used if the SDK exposes a way to prefer IPv4 or a specific server.

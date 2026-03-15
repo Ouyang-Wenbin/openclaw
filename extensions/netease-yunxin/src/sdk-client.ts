@@ -273,14 +273,22 @@ export async function createNimConnection(params: {
   onMessage: (msg: NimInboundMessage) => void;
   /** Sink for runtime status; set connected: false on SDK disconnect so health monitor can restart channel. */
   statusSink?: (patch: { lastInboundAt?: number; connected?: boolean }) => void;
+  /** Optional SDK init overrides (e.g. linkOption for custom link server / VPN stability). */
+  config?: { linkOption?: Record<string, unknown>; basicOption?: Record<string, unknown> };
 }): Promise<NimConnection | null> {
-  const { accountId, appKey, accid, token, runtime, onMessage, statusSink } = params;
+  const { accountId, appKey, accid, token, runtime, onMessage, statusSink, config } = params;
   const v2 = loadV2(runtime);
   if (!v2) return null;
 
   const initOption: V2NIMInitOption = {
     appkey: appKey,
     appDataPath: "",
+    ...(config?.basicOption && Object.keys(config.basicOption).length > 0
+      ? { basicOption: config.basicOption }
+      : {}),
+    ...(config?.linkOption && Object.keys(config.linkOption).length > 0
+      ? { linkOption: config.linkOption }
+      : {}),
   };
   const initResult = v2.init(initOption);
   if (initResult != null && (typeof initResult === "object" ? initResult?.code : initResult)) {

@@ -11,6 +11,16 @@ export type NeteaseYunxinAccountConfig = {
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   /** Max size (MB) for inbound image download; default 10. */
   mediaMaxMb?: number;
+  /**
+   * Optional SDK init linkOption (e.g. custom link server for VPN/overseas).
+   * Passed to node-nim V2 init; shape depends on node-nim version.
+   */
+  linkOption?: Record<string, unknown>;
+  /**
+   * Optional SDK init basicOption.
+   * Passed to node-nim V2 init; shape depends on node-nim version.
+   */
+  basicOption?: Record<string, unknown>;
 };
 
 export type NeteaseYunxinConfig = NeteaseYunxinAccountConfig & {

@@ -198,6 +198,13 @@ export const neteaseYunxinPlugin: ChannelPlugin<ResolvedNeteaseYunxinAccount> = 
           token: account.token,
           runtime: ctx.runtime,
           statusSink,
+          config:
+            account.config?.linkOption || account.config?.basicOption
+              ? {
+                  linkOption: account.config.linkOption,
+                  basicOption: account.config.basicOption,
+                }
+              : undefined,
           onMessage: (msg) => {
             void handleNeteaseYunxinInbound({
               message: {

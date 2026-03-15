@@ -81,6 +81,13 @@ export async function sendMessageNeteaseYunxinWithConfig(params: {
         token: account.token,
         runtime: { log: () => {}, error: () => {} },
         onMessage: () => {},
+        config:
+          account.config?.linkOption || account.config?.basicOption
+            ? {
+                linkOption: account.config.linkOption,
+                basicOption: account.config.basicOption,
+              }
+            : undefined,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
