@@ -7,7 +7,7 @@ param(
     [ValidateSet("npm", "git")]
     [string]$InstallMethod = "npm",
     [string]$GitDir,
-    [string]$Branch = "windows",
+    [string]$Branch = "master",
     [switch]$NoOnboard,
     [switch]$NoGitUpdate,
     [switch]$DryRun
@@ -512,7 +512,7 @@ function Install-OpenClawFromGit {
     Ensure-Git
     Ensure-Pnpm
 
-    $repoUrl = "https://github.com/Ouyang-Wenbin/openclaw.git"
+    $repoUrl = "https://gitee.com/ouyangwenbin2009/openclaw.git"
     Write-Host "[*] Installing OpenClaw from GitHub ($repoUrl), branch: $BranchName..." -ForegroundColor Yellow
 
     if (-not (Test-Path $RepoDir)) {
