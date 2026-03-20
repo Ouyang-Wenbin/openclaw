@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
  * NetEase Yunxin node-nim SDK wrapper (V10).
  * Initialization and login: https://doc.yunxin.163.com/messaging2/guide/zA0ODU5Mzk
  * Message收发: https://doc.yunxin.163.com/messaging2/guide/收发消息
- * Uses V2NIMClient: getMessageService().on('receiveMessages'), messageCreator.createTextMessage, sendMessage.
+ * Uses V2NIMClient: getMessageService().on('receiveMessages'), sendMessage with custom mdMsg (messageType=100).
  */
 import path from "node:path";
 
@@ -452,6 +452,40 @@ export async function createNimConnection(params: {
   /** Message type: 6 = file (FILE). */
   const MESSAGE_TYPE_FILE = 6;
 
+  /** Message type: 100 = custom (自定义消息). */
+  const MESSAGE_TYPE_CUSTOM = 100;
+
+  /** Whether message is custom type (by number or string "custom"). */
+  const isCustomMessage = (msg: V2NIMMessage, numericType: number): boolean =>
+    numericType === MESSAGE_TYPE_CUSTOM ||
+    String(msg.messageType ?? msg.type ?? "").toLowerCase() === "custom";
+
+  /** Parse custom message body as string (attachment.raw, body, content, or text). */
+  const parseCustomMessageBody = (m: V2NIMMessage): string => {
+    const att = m.attachment;
+    if (att && typeof att === "object") {
+      const raw = att.raw;
+      if (typeof raw === "string" && raw.trim()) {
+        try {
+          const obj = JSON.parse(raw) as Record<string, unknown>;
+          if (obj && typeof obj === "object") {
+            const body = obj.body ?? obj.content ?? obj.text ?? obj.data;
+            if (typeof body === "string" && body.trim()) return body.trim();
+            return raw.trim().length <= 500 ? raw.trim() : raw.trim().slice(0, 500) + "…";
+          }
+        } catch {
+          return raw.trim().length <= 500 ? raw.trim() : raw.trim().slice(0, 500) + "…";
+        }
+      }
+    }
+    const body =
+      (m as { body?: string; content?: string }).body ?? (m as { content?: string }).content;
+    if (typeof body === "string" && body.trim()) return body.trim();
+    const t = String(m.text ?? "").trim();
+    if (t) return t;
+    return "[自定义消息]";
+  };
+
   /** Parse file URL and name from FILE message (messageType=6, attachment with url/name or raw JSON). */
   const parseFileFromMessage = (m: V2NIMMessage): { url: string; name: string } | undefined => {
     const att = m.attachment;
@@ -521,6 +555,8 @@ export async function createNimConnection(params: {
         const text = String(m.text != null ? m.text : "").trim();
         const imageUrl = type === 1 ? parseImageUrlFromMessage(m) : undefined;
         const fileInfo = type === MESSAGE_TYPE_FILE ? parseFileFromMessage(m) : undefined;
+        const isCustom = isCustomMessage(m, type);
+        const customBody = isCustom ? parseCustomMessageBody(m) : "";
         const isText =
           type === 0 ||
           (text.length > 0 &&
@@ -530,9 +566,13 @@ export async function createNimConnection(params: {
             type !== 4 &&
             type !== 5 &&
             type !== MESSAGE_TYPE_FILE &&
-            type !== 10);
+            type !== 10 &&
+            !isCustom);
         const isTextOrImageOrFile =
-          isText || (type === 1 && imageUrl) || (type === MESSAGE_TYPE_FILE && fileInfo?.url);
+          isText ||
+          (type === 1 && imageUrl) ||
+          (type === MESSAGE_TYPE_FILE && fileInfo?.url) ||
+          isCustom;
         if (!isTextOrImageOrFile) {
           logSkip("not text or image or file", m);
           skipped += 1;
@@ -596,7 +636,7 @@ export async function createNimConnection(params: {
               ? `team:${teamId}:${from}:image:${messageId}`
               : type === MESSAGE_TYPE_FILE && fileInfo?.url
                 ? `team:${teamId}:${from}:file:${messageId}`
-                : `team:${teamId}:${from}:${text}`;
+                : `team:${teamId}:${from}:${text || customBody}`;
           if (teamDedupe.processing.has(teamFromTextKey)) {
             skipped += 1;
             continue;
@@ -625,6 +665,7 @@ export async function createNimConnection(params: {
           statusSink?.({ lastInboundAt: Date.now() });
           const teamBody =
             text ||
+            customBody ||
             (imageUrl ? "<media:image>" : "") ||
             (fileInfo ? `[文件] ${fileInfo.name}` : "");
           runtime.log?.(
@@ -670,7 +711,7 @@ export async function createNimConnection(params: {
             ? `${from}:image:${messageId}`
             : type === MESSAGE_TYPE_FILE && fileInfo?.url
               ? `${from}:file:${messageId}`
-              : `${from}:${text}`;
+              : `${from}:${text || customBody}`;
         if (dedupe.processing.has(fromTextKey)) {
           skipped += 1;
           continue;
@@ -698,7 +739,10 @@ export async function createNimConnection(params: {
         accepted += 1;
         statusSink?.({ lastInboundAt: Date.now() });
         const p2pBody =
-          text || (imageUrl ? "<media:image>" : "") || (fileInfo ? `[文件] ${fileInfo.name}` : "");
+          text ||
+          customBody ||
+          (imageUrl ? "<media:image>" : "") ||
+          (fileInfo ? `[文件] ${fileInfo.name}` : "");
         runtime.log?.(
           `[netease-yunxin] RECV from=${from} text=${p2pBody != null ? String(p2pBody).slice(0, 80) : ""}${imageUrl ? " [image]" : ""}${fileInfo ? " [file]" : ""}`,
         );
@@ -725,23 +769,31 @@ export async function createNimConnection(params: {
     );
   }
 
+  /** Build custom mdMsg message body for send (same format as inbound). */
+  const buildMdMsgPayload = (content: string): string =>
+    JSON.stringify({ type: "mdMsg", data: { content: content ?? "" } });
+
   const sendText = async (
     toAccid: string,
     text: string,
   ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
-    if (!messageCreator?.createTextMessage || !messageService?.sendMessage || !conversationIdUtil) {
+    if (!messageService?.sendMessage || !conversationIdUtil) {
       return {
         ok: false,
-        error: "V2 messageService/messageCreator/conversationIdUtil not available",
+        error: "V2 messageService/conversationIdUtil not available",
       };
     }
     try {
-      const msg = messageCreator.createTextMessage(text);
-      if (!msg) {
-        return { ok: false, error: "createTextMessage returned null" };
-      }
+      const payload = buildMdMsgPayload(text ?? "");
+      const msg: V2NIMMessage = {
+        messageType: MESSAGE_TYPE_CUSTOM,
+        attachment: { raw: payload },
+        text: "",
+      };
       const conversationId = conversationIdUtil.p2pConversationId(toAccid);
-      runtime.log?.(`[netease-yunxin] SDK send to=${toAccid} text=${text?.slice(0, 50)}`);
+      runtime.log?.(
+        `[netease-yunxin] SDK send to=${toAccid} mdMsg content=${(text ?? "").slice(0, 50)}`,
+      );
       const SEND_TIMEOUT_MS = 25_000;
       const sendPromise = messageService.sendMessage(msg, conversationId, {}, null);
       const sendTimeout = new Promise<never>((_, reject) => {
@@ -776,10 +828,10 @@ export async function createNimConnection(params: {
     teamId: string,
     text: string,
   ): Promise<{ ok: boolean; messageId?: string; error?: string }> => {
-    if (!messageCreator?.createTextMessage || !messageService?.sendMessage || !conversationIdUtil) {
+    if (!messageService?.sendMessage || !conversationIdUtil) {
       return {
         ok: false,
-        error: "V2 messageService/messageCreator/conversationIdUtil not available",
+        error: "V2 messageService/conversationIdUtil not available",
       };
     }
     const teamConvId =
@@ -794,11 +846,15 @@ export async function createNimConnection(params: {
       };
     }
     try {
-      const msg = messageCreator.createTextMessage(text);
-      if (!msg) {
-        return { ok: false, error: "createTextMessage returned null" };
-      }
-      runtime.log?.(`[netease-yunxin] SDK send team=${teamId} text=${text?.slice(0, 50)}`);
+      const payload = buildMdMsgPayload(text ?? "");
+      const msg: V2NIMMessage = {
+        messageType: MESSAGE_TYPE_CUSTOM,
+        attachment: { raw: payload },
+        text: "",
+      };
+      runtime.log?.(
+        `[netease-yunxin] SDK send team=${teamId} mdMsg content=${(text ?? "").slice(0, 50)}`,
+      );
       const SEND_TIMEOUT_MS = 25_000;
       const sendPromise = messageService.sendMessage(msg, teamConvId, {}, null);
       const sendTimeout = new Promise<never>((_, reject) => {
